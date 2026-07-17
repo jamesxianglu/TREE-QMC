@@ -11,6 +11,9 @@ Instance::Instance(int argc, char **argv) {
     mapping_file = "";
     stree_file = "";
     table_file = "";
+    rowsweep_file = "";
+    rowsweep_out_file = "";
+    rowsweep_delta = 0.0;
     root_str = "";
     annotation_tree_file = "";
     //pvalue_file = "";
@@ -210,6 +213,26 @@ long long Instance::solve() {
         std::cout << output_net->to_string_basic() << std::endl;
     }
     
+
+    #if ENABLE_TOB
+    if (rowsweep_file != "") {
+        if (output == NULL) {
+            std::cout << "ERROR: --rowsweep requires a species/gene-tree SpeciesTree object; "
+                      << "it cannot be combined with --network mode." << std::endl;
+            exit(1);
+        }
+        std::cout << "Running row-sweep split experiment" << std::endl;
+        std::unordered_map<std::string, index_t> name2index;
+        for (index_t idx = 0; idx < dict->size(); idx++)
+            name2index[dict->index2label(idx)] = idx;
+        output->run_split_experiment(input, name2index, rowsweep_file, rowsweep_out_file, rowsweep_delta);
+    }
+    #else
+    if (rowsweep_file != "") {
+        std::cout << "TREE-QMC was not compiled with tree of blob options!" << std::endl;
+        exit(1);
+    }
+    #endif  // ENABLE_TOB
 
     if (!load_pvalue && (store_pvalue || blob)) {
         #if ENABLE_TOB
@@ -671,6 +694,33 @@ int Instance::parse(int argc, char **argv) {
             if (i < argc - 1) param = argv[++ i];
             if (! s2ul(param, &iter_limit)) {
                 std::cout << "\nERROR: invalid parameter: " << param << std::endl;
+                return 2;
+            }
+        }
+        else if (opt == "--rowsweep") {
+            if (i < argc - 1) {
+                rowsweep_file = argv[++ i];
+            }
+            else {
+                std::cout << "\nERROR: No bipartition file specified" << std::endl;
+                return 2;
+            }
+        }
+        else if (opt == "--rowsweep_out") {
+            if (i < argc - 1) {
+                rowsweep_out_file = argv[++ i];
+            }
+            else {
+                std::cout << "\nERROR: No rowsweep output file specified" << std::endl;
+                return 2;
+            }
+        }
+        else if (opt == "--delta") {
+            if (i < argc - 1) {
+                rowsweep_delta = std::stod(argv[++ i]);
+            }
+            else {
+                std::cout << "\nERROR: No delta specified" << std::endl;
                 return 2;
             }
         }

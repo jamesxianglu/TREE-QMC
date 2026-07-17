@@ -1858,6 +1858,111 @@ SpeciesTree::SpeciesTree(Tree *input, Dict *dict, weight_t alpha, weight_t beta,
 }
 ///////////above is for net-cs //////////////////////////////////
 
+// Query(x,y,rho,r) == xy|rho r : one oracle call on the 4-taxon set {x,y,rho,r}
+bool SpeciesTree::query_pairs_together(std::vector<Tree *> &input, index_t x, index_t y, index_t rho, index_t r) {
+    index_t indices[4] = {x, y, rho, r};
+    auto [_, qcfs] = get_pvalue_and_qCFs(input, indices);
+    return is_match_with_split(qcfs, x, y, indices);
+}
+
+// RowSweepTest(A, B, delta) -> true = ACCEPT, false = REJECT
+// Index-based version of row_sweep_test: takes taxon indices directly instead
+// of Node* pointers, so it can be driven from a plain-text bipartition file
+// without needing a base tree.
+bool SpeciesTree::row_sweep_test_idx(std::vector<Tree *> &input,
+                                     std::vector<index_t> &A,
+                                     std::vector<index_t> &B,
+                                     double delta) {
+    std::vector<index_t> &S = (A.size() >= B.size()) ? A : B;  // larger side
+    std::vector<index_t> &R = (A.size() >= B.size()) ? B : A;  // smaller side
+    const size_t s = S.size();
+    if (s < 2 || R.size() < 2) return true;   // not testable -> ACCEPT (trivial split)
+
+    const size_t r_free = R.size() - 1;          // |R \ {rho}|
+    const double theta  = (1.0 + delta) / 4.0;
+    const index_t rho   = R[0];
+
+    std::vector<std::vector<size_t>> c(s, std::vector<size_t>(r_free, 0));
+
+    for (size_t xi = 0; xi < s; xi++) {
+        for (size_t yi = xi + 1; yi < s; yi++) {
+            const index_t x = S[xi];
+            const index_t y = S[yi];
+            for (size_t ri = 0; ri < r_free; ri++) {
+                const index_t r = R[ri + 1];
+                if (!query_pairs_together(input, x, y, rho, r)) {
+                    c[xi][ri]++;
+                    c[yi][ri]++;
+                }
+            }
+        }
+    }
+
+    for (size_t xi = 0; xi < s; xi++) {
+        for (size_t ri = 0; ri < r_free; ri++) {
+            double phat = (double) c[xi][ri] / (double)(s - 1);
+            if (phat > theta) return false;   // REJECT
+        }
+    }
+    return true;                              // ACCEPT
+}
+
+// Parse a comma-separated list of taxon names into indices, using the dict-derived
+// name2index map built by the caller. Exits with an error on an unrecognized name,
+// rather than silently minting a new index (which Dict::label2index would do).
+static std::vector<index_t> row_sweep_parse_side(const std::string &field,
+        const std::unordered_map<std::string, index_t> &name2index) {
+    std::vector<index_t> out;
+    std::stringstream ss(field);
+    std::string name;
+    while (std::getline(ss, name, ',')) {
+        if (name.empty()) continue;
+        auto it = name2index.find(name);
+        if (it == name2index.end()) {
+            std::cerr << "ERROR: unknown taxon in --rowsweep file: " << name << std::endl;
+            exit(1);
+        }
+        out.push_back(it->second);
+    }
+    return out;
+}
+
+// Reads a TSV of "id\tA\tB" bipartitions (A, B = comma-separated taxon names),
+// runs row_sweep_test_idx on each, and writes "id\tprediction" (1 = ACCEPT/split, 0 = REJECT).
+void SpeciesTree::run_split_experiment(std::vector<Tree *> &input,
+        const std::unordered_map<std::string, index_t> &name2index,
+        const std::string &bipartition_file,
+        const std::string &output_file,
+        double delta) {
+    std::ifstream fin(bipartition_file);
+    if (fin.fail()) {
+        std::cout << "\nERROR: Unable to open " << bipartition_file << std::endl;
+        exit(1);
+    }
+    std::ofstream fout(output_file);
+    if (fout.fail()) {
+        std::cout << "\nERROR: Unable to write to " << output_file << std::endl;
+        exit(1);
+    }
+    fout << "id\tprediction\n";
+    std::string line;
+    while (std::getline(fin, line)) {
+        if (line.empty()) continue;
+        std::stringstream ss(line);
+        std::string id, aField, bField;
+        std::getline(ss, id, '\t');
+        std::getline(ss, aField, '\t');
+        std::getline(ss, bField, '\t');
+        if (id == "id") continue;                       // header
+        std::vector<index_t> A = row_sweep_parse_side(aField, name2index);
+        std::vector<index_t> B = row_sweep_parse_side(bField, name2index);
+        bool accept = row_sweep_test_idx(input, A, B, delta);
+        fout << id << "\t" << (accept ? 1 : 0) << "\n";
+    }
+    fin.close();
+    fout.close();
+    std::cout << "Wrote row-sweep predictions to " << output_file << std::endl;
+}
 
 // 2f2a search algorithm O(n^3)
 SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict, SpeciesTree* display) {
