@@ -836,9 +836,10 @@ void SpeciesTree::pivot_scan(std::vector<Tree *> &gene_trees, Dict *dict, Node *
                 multi_partitions_index_no_pivot.push_back(i);
             }
         }
-        // random shuffle 
-        std::random_shuffle(multi_partitions_index_no_pivot.begin(),
-                multi_partitions_index_no_pivot.end());
+        // random shuffle
+        static std::mt19937 rsw_rng(12345);
+        std::shuffle(multi_partitions_index_no_pivot.begin(),
+                multi_partitions_index_no_pivot.end(), rsw_rng);
 
         // index_t partition_dmmy = multi_partitions_index_no_pivot[0];
         
@@ -1934,6 +1935,8 @@ void SpeciesTree::run_split_experiment(std::vector<Tree *> &input,
         const std::string &bipartition_file,
         const std::string &output_file,
         double delta) {
+    add_r_libpaths_and_load(RINS);                 // load MSCquartets before any pvalue() call
+    for (Tree *t : input) t->LCA_preprocessing();  // required by get_quartet()
     std::ifstream fin(bipartition_file);
     if (fin.fail()) {
         std::cout << "\nERROR: Unable to open " << bipartition_file << std::endl;

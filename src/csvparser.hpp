@@ -476,7 +476,7 @@ public:
     {
         std::string value;
         FieldType key;
-        int maxlen[fieldcount] = {0};
+        std::vector<int> maxlen(fieldcount, 0);
         for (int i = 0; i < fieldcount; i++)
         {
             key = TrueFields[i].key;

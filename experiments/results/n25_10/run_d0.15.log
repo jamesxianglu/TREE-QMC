@@ -1,0 +1,35 @@
+TREE-QMC version 4.1.5
+COMMAND: /Users/jameslzy/Desktop/Code/CompBio/TREE-QMC/build/tree-qmc -i /Users/jameslzy/Desktop/Code/CompBio/data/camus-dataset/n25/10/iqtree_500.nwk --rowsweep /Users/jameslzy/Desktop/Code/CompBio/TREE-QMC/experiments/results/n25_10/bips.tsv --rowsweep_out /Users/jameslzy/Desktop/Code/CompBio/TREE-QMC/experiments/results/n25_10/pred_d0.15.tsv --delta 0.15 
+
+SETTINGS:
+input file: /Users/jameslzy/Desktop/Code/CompBio/data/camus-dataset/n25/10/iqtree_500.nwk
+output file: std
+weighting mode: none
+  WARNING: --hybrid option is recommended
+normalization for artifical taxa mode: n2
+execution mode: efficient
+random seed for refinement: 12345
+random seed for max-cut: 1
+max-cut heuristic iteration limit: 10
+
+LOGGING:
+Reading input
+Found
+    1000 trees
+    26 taxa
+    0 polytomies across all trees
+Constructing species tree
+At most 47 subproblems:
+    0 subproblems computed.
+   10 subproblems computed.
+   20 subproblems computed.
+   30 subproblems computed.
+   40 subproblems computed.
+   47 subproblems computed.
+Printing output tree/network:
+(((((t20,t11),t2),t15),(((t24,t18),((t8,t1),(t4,t25))),((t16,t17),t21))),((((((t5,t23),t7),(t3,t22)),((t6,t19),t12)),((t9,t10),(t13,t14))),OUT));
+Running row-sweep split experiment
+Wrote row-sweep predictions to /Users/jameslzy/Desktop/Code/CompBio/TREE-QMC/experiments/results/n25_10/pred_d0.15.tsv
+Writing species tree
+(((((t20,t11),t2),t15),(((t24,t18),((t8,t1),(t4,t25))),((t16,t17),t21))),((((((t5,t23),t7),(t3,t22)),((t6,t19),t12)),((t9,t10),(t13,t14))),OUT));
+Execution time: 18secs

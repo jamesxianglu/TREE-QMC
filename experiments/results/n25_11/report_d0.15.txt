@@ -1,0 +1,21 @@
+======================================================================
+row_sweep_test_idx  |  n25/11  |  delta = 0.15  (theta = 0.2875)
+======================================================================
+leaves                 : 26
+gene trees             : iqtree_500.nwk
+tree-of-blobs source   : PhyloNetworks.treeofblobs
+positives (true splits): 19
+negatives (non-splits) : 57  (25 hard + 32 random)
+
+-- theory reference (Thm, eps=0.05) --
+  larger-side size s ranges over positives; min s = 18
+  guarantee needs  s-1 >= 252   (NOT satisfied -> worst-case bound vacuous; relies on realized noise << delta)
+
+-- results --
+  FALSE NEGATIVES :  0/19  (  0.0%)   (true split wrongly REJECTED)
+  FALSE POSITIVES :  0/57  (  0.0%)   (non-split wrongly ACCEPTED)
+  accuracy        : 100.0%
+
+-- weakness summary --
+  * no false negatives at this delta.
+  * no false positives at this delta.
