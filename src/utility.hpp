@@ -47,6 +47,7 @@ weight_t *init(index_t size);
 weight_t pvalue(index_t *indices);
 std::vector<weight_t> pvalue_all(index_t *indices);
 weight_t pvalue(weight_t *qCF);
+weight_t pvalue_t1(weight_t *qCF);
 weight_t pvalue_star(weight_t *qCF);
 
 const std::string help_info = 
@@ -140,6 +141,8 @@ const std::string help_info =
 "        Hyperparameter for hypothesis testing with tree-test (default: 1e-7)\n"
 "[(--beta <float number>)]\n"
 "        Hyperparameter for hypothesis testing with star-test (default: 0.95)\n"
+"[(--query-alpha <float number>)]\n"
+"        Per-query level for the row-sweep T1 tree test (default: 0.05)\n"
 "[(--blobsearchonly) <base tree file>]\n"
 "        Perform hypothesis testing on input base tree\n"
 "\n"

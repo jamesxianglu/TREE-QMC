@@ -14,6 +14,7 @@ Instance::Instance(int argc, char **argv) {
     rowsweep_file = "";
     rowsweep_out_file = "";
     rowsweep_delta = 0.0;
+    rowsweep_query_alpha = 0.05;
     root_str = "";
     annotation_tree_file = "";
     //pvalue_file = "";
@@ -225,7 +226,8 @@ long long Instance::solve() {
         std::unordered_map<std::string, index_t> name2index;
         for (index_t idx = 0; idx < dict->size(); idx++)
             name2index[dict->index2label(idx)] = idx;
-        output->run_split_experiment(input, name2index, rowsweep_file, rowsweep_out_file, rowsweep_delta);
+        output->run_split_experiment(input, name2index, rowsweep_file, rowsweep_out_file,
+                                     rowsweep_delta, rowsweep_query_alpha);
     }
     #else
     if (rowsweep_file != "") {
@@ -724,6 +726,16 @@ int Instance::parse(int argc, char **argv) {
                 return 2;
             }
         }
+        else if (opt == "--query-alpha") {
+            std::string param = "";
+            if (i < argc - 1) param = argv[++ i];
+            if (!s2d(param, &rowsweep_query_alpha) || !std::isfinite(rowsweep_query_alpha) ||
+                    rowsweep_query_alpha < 0.0 || rowsweep_query_alpha > 1.0) {
+                std::cout << "\nERROR: --query-alpha must be between 0 and 1: "
+                          << param << std::endl;
+                return 2;
+            }
+        }
         else {
             std::cout << "ERROR: Unrecognized option: " << opt << std::endl;
             exit(1);
@@ -745,6 +757,9 @@ int Instance::parse(int argc, char **argv) {
     if (mapping_file != "") std::cout << "mapping file: " << mapping_file << std::endl;
     if (stree_file != "") std::cout << "species tree file: " << stree_file << std::endl;
     if (table_file != "") std::cout << "table file: " << table_file << std::endl;
+    if (rowsweep_file != "") {
+        std::cout << "row-sweep query alpha: " << rowsweep_query_alpha << std::endl;
+    }
 
     // Output file
     if (output_file == "")

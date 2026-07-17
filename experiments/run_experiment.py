@@ -10,121 +10,215 @@ FNR/FPR per delta plus a per-(dataset, delta) CSV.
 
 Usage:
     python3 run_experiment.py [--group n15] [--datasets N] [--gene-trees FILE]
-                              [--deltas 0.05,...] [--seed S] [--outdir DIR]
+                              [--deltas 0.05,...] [--query-alpha A]
+                              [--seed S] [--outdir DIR]
 """
 
 import argparse
 import csv
 import os
+from dataclasses import dataclass
 
-from common import (camus_root, default_binary, compute_tob_splits, run_rowsweep,
-                    read_labels, read_predictions, score)
+from common import (camus_root, compute_tob_splits, default_binary, log_tail,
+                    read_labels, read_predictions, run_rowsweep, score)
 from gen_bipartitions import build_bipartition_file
 
 DEFAULT_DELTAS = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
-def select_datasets(group_dir, n):
-    ds = []
-    for d in sorted(os.listdir(group_dir)):
-        p = os.path.join(group_dir, d)
-        if os.path.isdir(p) and os.path.exists(os.path.join(p, "true_net.nwk")):
-            ds.append(d)
-        if len(ds) >= n:
+@dataclass(frozen=True)
+class PreparedDataset:
+    name: str
+    gene_trees: str
+    bipartitions: str
+    labels: dict
+
+
+def select_datasets(group_dir, limit):
+    datasets = []
+    for name in sorted(os.listdir(group_dir)):
+        dataset_dir = os.path.join(group_dir, name)
+        network = os.path.join(dataset_dir, "true_net.nwk")
+        if os.path.isdir(dataset_dir) and os.path.exists(network):
+            datasets.append(name)
+        if len(datasets) >= limit:
             break
-    return ds
+    return datasets
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--binary", default=default_binary())
+    parser.add_argument("--group", default="n15")
+    parser.add_argument("--datasets", type=int, default=10)
+    parser.add_argument("--gene-trees", default="iqtree_500.nwk")
+    parser.add_argument("--deltas", default=",".join(str(d) for d in DEFAULT_DELTAS))
+    parser.add_argument("--query-alpha", type=float, default=0.05,
+                        help="per-query significance level for the T1 test")
+    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--neg-mult", type=int, default=3)
+    parser.add_argument("--min-neg", type=int, default=30)
+    parser.add_argument("--outdir", default=os.path.join(HERE, "results", "sweep"))
+    args = parser.parse_args()
+    if not 0 <= args.query_alpha <= 1:
+        parser.error("--query-alpha must be between 0 and 1")
+    return args
+
+
+def ensure_output_directories(output_dir):
+    os.makedirs(output_dir, exist_ok=True)
+    for subdirectory in ("bips", "preds", "logs", "tob"):
+        os.makedirs(os.path.join(output_dir, subdirectory), exist_ok=True)
+
+
+def prepare_datasets(args, group_dir, dataset_names):
+    prepared = []
+    for name in dataset_names:
+        network = os.path.join(group_dir, name, "true_net.nwk")
+        gene_trees = os.path.join(group_dir, name, args.gene_trees)
+        tob = os.path.join(args.outdir, "tob", f"{name}.nwk")
+        bipartitions = os.path.join(args.outdir, "bips", f"{name}.tsv")
+
+        all_leaves, true_splits, source = compute_tob_splits(network, tob)
+        stats = build_bipartition_file(
+            all_leaves, true_splits, bipartitions,
+            seed=args.seed + int(name),
+            neg_mult=args.neg_mult,
+            min_neg=args.min_neg,
+        )
+        labels = read_labels(bipartitions)[0]
+        prepared.append(PreparedDataset(name, gene_trees, bipartitions, labels))
+        print(
+            f"  {args.group}/{name}: {stats.positive_count} pos, "
+            f"{stats.negative_count} neg "
+            f"({stats.hard_negative_count}h+{stats.random_negative_count}r)  "
+            f"[{source.split(' ')[0]}]"
+        )
+    return prepared
+
+
+def evaluate_datasets(args, datasets, deltas):
+    results = []
+    for dataset in datasets:
+        if not os.path.exists(dataset.gene_trees):
+            print(f"  WARN: {dataset.gene_trees} missing; skipping {dataset.name}")
+            continue
+
+        for delta in deltas:
+            run_tag = f"d{delta}_a{args.query_alpha}"
+            prediction_file = os.path.join(
+                args.outdir, "preds", f"{dataset.name}_{run_tag}.tsv"
+            )
+            log_file = os.path.join(args.outdir, "logs", f"{dataset.name}_{run_tag}.log")
+            return_code = run_rowsweep(
+                args.binary, dataset.gene_trees, dataset.bipartitions,
+                prediction_file, delta, log_file, args.query_alpha,
+            )
+            if return_code != 0 or not os.path.exists(prediction_file):
+                raise SystemExit(
+                    f"ERROR: tree-qmc failed (rc={return_code}) "
+                    f"{dataset.name} d={delta}\n{log_tail(log_file)}"
+                )
+
+            result = score(dataset.labels, read_predictions(prediction_file))
+            results.append({
+                "dataset": dataset.name,
+                "delta": delta,
+                "query_alpha": args.query_alpha,
+                "n_pos": result.positive_count,
+                "n_neg": result.negative_count,
+                "fn": result.false_negative_count,
+                "fp": result.false_positive_count,
+                "missing": result.missing_count,
+                "fn_rate": result.false_negative_rate,
+                "fp_rate": result.false_positive_rate,
+            })
+            print(
+                f"  {args.group}/{dataset.name} d={delta:<4}: "
+                f"FN {result.false_negative_count}/{result.positive_count} "
+                f"({result.false_negative_rate:.1%})  "
+                f"FP {result.false_positive_count}/{result.negative_count} "
+                f"({result.false_positive_rate:.1%})"
+            )
+    return results
+
+
+def write_csv(path, rows, fieldnames):
+    with open(path, "w", newline="") as output_file:
+        writer = csv.DictWriter(output_file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def summarize_by_delta(results, deltas):
+    print("\n=== POOLED across datasets (per delta) ===")
+    print(f"{'delta':>6} | {'FN/pos':>10} {'FNR':>7} | {'FP/neg':>10} {'FPR':>7}")
+    print("-" * 50)
+
+    summary = []
+    for delta in deltas:
+        matching_results = [row for row in results if row["delta"] == delta]
+        if not matching_results:
+            continue
+
+        false_negatives = sum(row["fn"] for row in matching_results)
+        positives = sum(row["n_pos"] for row in matching_results)
+        false_positives = sum(row["fp"] for row in matching_results)
+        negatives = sum(row["n_neg"] for row in matching_results)
+        false_negative_rate = false_negatives / positives if positives else float("nan")
+        false_positive_rate = false_positives / negatives if negatives else float("nan")
+        summary.append({
+            "delta": delta,
+            "query_alpha": matching_results[0]["query_alpha"],
+            "FN": false_negatives,
+            "n_pos": positives,
+            "FP": false_positives,
+            "n_neg": negatives,
+            "fn_rate": false_negative_rate,
+            "fp_rate": false_positive_rate,
+        })
+        print(
+            f"{delta:>6} | {f'{false_negatives}/{positives}':>10} "
+            f"{false_negative_rate:>6.1%} | {f'{false_positives}/{negatives}':>10} "
+            f"{false_positive_rate:>6.1%}"
+        )
+    return summary
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--binary", default=default_binary())
-    ap.add_argument("--group", default="n15")
-    ap.add_argument("--datasets", type=int, default=10)
-    ap.add_argument("--gene-trees", default="iqtree_500.nwk")
-    ap.add_argument("--deltas", default=",".join(str(d) for d in DEFAULT_DELTAS))
-    ap.add_argument("--seed", type=int, default=1)
-    ap.add_argument("--neg-mult", type=int, default=3)
-    ap.add_argument("--min-neg", type=int, default=30)
-    ap.add_argument("--outdir", default=os.path.join(HERE, "results", "sweep"))
-    args = ap.parse_args()
+    args = parse_args()
 
     if not os.path.exists(args.binary):
         raise SystemExit(f"ERROR: tree-qmc binary not found at {args.binary}")
 
     group_dir = os.path.join(camus_root(), args.group)
     deltas = [float(x) for x in args.deltas.split(",")]
-    datasets = select_datasets(group_dir, args.datasets)
-    os.makedirs(args.outdir, exist_ok=True)
-    for sub in ("bips", "preds", "logs", "tob"):
-        os.makedirs(os.path.join(args.outdir, sub), exist_ok=True)
+    dataset_names = select_datasets(group_dir, args.datasets)
+    ensure_output_directories(args.outdir)
 
-    print(f"Group: {args.group}   Datasets: {datasets}")
-    print(f"Deltas: {deltas}   Gene trees: {args.gene_trees}\n")
+    print(f"Group: {args.group}   Datasets: {dataset_names}")
+    print(f"Deltas: {deltas}   T1 alpha: {args.query_alpha}   "
+          f"Gene trees: {args.gene_trees}\n")
 
-    labels_by_ds = {}
-    for d in datasets:
-        net = os.path.join(group_dir, d, "true_net.nwk")
-        tob = os.path.join(args.outdir, "tob", f"{d}.nwk")
-        bip = os.path.join(args.outdir, "bips", f"{d}.tsv")
-        all_leaves, splits, source = compute_tob_splits(net, tob)
-        stats = build_bipartition_file(all_leaves, splits, bip,
-                                       seed=args.seed + int(d),
-                                       neg_mult=args.neg_mult, min_neg=args.min_neg)
-        labels_by_ds[d] = read_labels(bip)[0]
-        print(f"  {args.group}/{d}: {stats['n_positive']} pos, {stats['n_negative']} neg "
-              f"({stats['n_hard_neg']}h+{stats['n_rand_neg']}r)  [{source.split(' ')[0]}]")
+    datasets = prepare_datasets(args, group_dir, dataset_names)
+    results = evaluate_datasets(args, datasets, deltas)
+    detail_fields = [
+        "dataset", "delta", "query_alpha", "n_pos", "n_neg", "fn", "fp", "missing",
+        "fn_rate", "fp_rate",
+    ]
+    alpha_tag = f"a{args.query_alpha}"
+    write_csv(os.path.join(args.outdir, f"detail_{alpha_tag}.csv"), results, detail_fields)
 
-    rows = []
-    for d in datasets:
-        gt = os.path.join(group_dir, d, args.gene_trees)
-        if not os.path.exists(gt):
-            print(f"  WARN: {gt} missing; skipping {d}")
-            continue
-        bip = os.path.join(args.outdir, "bips", f"{d}.tsv")
-        for delta in deltas:
-            out = os.path.join(args.outdir, "preds", f"{d}_d{delta}.tsv")
-            log = os.path.join(args.outdir, "logs", f"{d}_d{delta}.log")
-            rc, cmd = run_rowsweep(args.binary, gt, bip, out, delta, log)
-            if rc != 0 or not os.path.exists(out):
-                tail = "".join(open(log).readlines()[-20:]) if os.path.exists(log) else ""
-                raise SystemExit(f"ERROR: tree-qmc failed (rc={rc}) {d} d={delta}\n{tail}")
-            s = score(labels_by_ds[d], read_predictions(out))
-            fnr = s["fn"] / s["n_pos"] if s["n_pos"] else float("nan")
-            fpr = s["fp"] / s["n_neg"] if s["n_neg"] else float("nan")
-            rows.append(dict(dataset=d, delta=delta, n_pos=s["n_pos"], n_neg=s["n_neg"],
-                            fn=s["fn"], fp=s["fp"], missing=s["missing"],
-                            fn_rate=fnr, fp_rate=fpr))
-            print(f"  {args.group}/{d} d={delta:<4}: FN {s['fn']}/{s['n_pos']} ({fnr:.1%})  "
-                  f"FP {s['fp']}/{s['n_neg']} ({fpr:.1%})")
-
-    with open(os.path.join(args.outdir, "detail.csv"), "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["dataset", "delta", "n_pos", "n_neg",
-                                          "fn", "fp", "missing", "fn_rate", "fp_rate"])
-        w.writeheader()
-        for r in rows:
-            w.writerow(r)
-
-    print("\n=== POOLED across datasets (per delta) ===")
-    print(f"{'delta':>6} | {'FN/pos':>10} {'FNR':>7} | {'FP/neg':>10} {'FPR':>7}")
-    print("-" * 50)
-    summary = []
-    for delta in deltas:
-        rs = [r for r in rows if r["delta"] == delta]
-        if not rs:
-            continue
-        FN = sum(r["fn"] for r in rs); P = sum(r["n_pos"] for r in rs)
-        FP = sum(r["fp"] for r in rs); Nn = sum(r["n_neg"] for r in rs)
-        fnr = FN / P if P else float("nan")
-        fpr = FP / Nn if Nn else float("nan")
-        summary.append(dict(delta=delta, FN=FN, n_pos=P, FP=FP, n_neg=Nn, fn_rate=fnr, fp_rate=fpr))
-        print(f"{delta:>6} | {f'{FN}/{P}':>10} {fnr:>6.1%} | {f'{FP}/{Nn}':>10} {fpr:>6.1%}")
-
-    with open(os.path.join(args.outdir, "summary_by_delta.csv"), "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["delta", "FN", "n_pos", "FP", "n_neg", "fn_rate", "fp_rate"])
-        w.writeheader()
-        for r in summary:
-            w.writerow(r)
+    summary = summarize_by_delta(results, deltas)
+    summary_fields = [
+        "delta", "query_alpha", "FN", "n_pos", "FP", "n_neg", "fn_rate", "fp_rate",
+    ]
+    write_csv(
+        os.path.join(args.outdir, f"summary_by_delta_{alpha_tag}.csv"),
+        summary,
+        summary_fields,
+    )
     print(f"\nWrote results under {args.outdir}")
 
 

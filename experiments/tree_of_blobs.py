@@ -18,7 +18,6 @@ should be REJECTed.
 This module only parses the network and finds bridges -- no external deps.
 """
 
-import re
 import sys
 from collections import defaultdict
 
@@ -42,42 +41,52 @@ def parse_extended_newick(nwk):
 
     nodes = {}                 # id -> {"name": str|None, "hybrid": str|None, "children": [ids]}
     hybrid_map = {}            # hybrid tag -> node id
-    counter = [0]
+    next_node_id = 0
 
     def new_node():
-        nid = counter[0]
-        counter[0] += 1
+        nonlocal next_node_id
+        nid = next_node_id
+        next_node_id += 1
         nodes[nid] = {"name": None, "hybrid": None, "children": []}
         return nid
 
-    i = [0]
+    position = 0
     n = len(s)
 
     def parse_subtree():
+        nonlocal position
+        if position >= n:
+            raise NetworkParseError("unexpected end of extended Newick string")
+
         children = []
-        if s[i[0]] == "(":
-            i[0] += 1
+        if s[position] == "(":
+            position += 1
             while True:
                 children.append(parse_subtree())
-                c = s[i[0]]
-                if c == ",":
-                    i[0] += 1
+                if position >= n:
+                    raise NetworkParseError("unexpected end while reading child list")
+                delimiter = s[position]
+                if delimiter == ",":
+                    position += 1
                     continue
-                if c == ")":
-                    i[0] += 1
+                if delimiter == ")":
+                    position += 1
                     break
-                raise NetworkParseError(f"expected ',' or ')' at pos {i[0]}: ...{s[i[0]:i[0]+20]}")
+                context = s[position:position + 20]
+                raise NetworkParseError(
+                    f"expected ',' or ')' at position {position}: ...{context}"
+                )
 
         # Read the label token: everything up to ',', ')', ':', or end.
-        start = i[0]
-        while i[0] < n and s[i[0]] not in ",():":
-            i[0] += 1
-        label = s[start:i[0]]
+        label_start = position
+        while position < n and s[position] not in ",():":
+            position += 1
+        label = s[label_start:position]
 
         # Skip branch-length / support / gamma annotations ":len:sup:gamma".
-        if i[0] < n and s[i[0]] == ":":
-            while i[0] < n and s[i[0]] not in ",()":
-                i[0] += 1
+        if position < n and s[position] == ":":
+            while position < n and s[position] not in ",()":
+                position += 1
 
         # Split label into taxon-name part and optional hybrid tag.
         name = None
@@ -109,8 +118,10 @@ def parse_extended_newick(nwk):
         return nid
 
     parse_subtree()
-    if i[0] != n:
-        raise NetworkParseError(f"trailing characters after root at pos {i[0]}: {s[i[0]:]}")
+    if position != n:
+        raise NetworkParseError(
+            f"trailing characters after root at position {position}: {s[position:]}"
+        )
 
     # Build undirected edge list from parent->child relations.
     edges = []
@@ -133,55 +144,76 @@ def find_bridges(num_nodes, edges):
     Uses the standard low-link DFS.  Parallel edges are handled by skipping the
     specific edge index we arrived on, not merely the parent node.
     """
-    adj = defaultdict(list)                 # node -> list of (neighbor, edge_index)
-    for idx, (u, v) in enumerate(edges):
-        adj[u].append((v, idx))
-        adj[v].append((u, idx))
+    adjacency = defaultdict(list)           # node -> list of (neighbor, edge_index)
+    for edge_index, (u, v) in enumerate(edges):
+        adjacency[u].append((v, edge_index))
+        adjacency[v].append((u, edge_index))
 
-    disc = [-1] * num_nodes
+    discovery_time = [-1] * num_nodes
     low = [0] * num_nodes
     bridges = set()
-    timer = [0]
+    next_discovery_time = 0
 
     sys.setrecursionlimit(10000)
 
-    def dfs(u, in_edge):
-        disc[u] = low[u] = timer[0]
-        timer[0] += 1
-        for v, eidx in adj[u]:
-            if eidx == in_edge:
+    def dfs(node, incoming_edge):
+        nonlocal next_discovery_time
+        discovery_time[node] = low[node] = next_discovery_time
+        next_discovery_time += 1
+        for neighbor, edge_index in adjacency[node]:
+            if edge_index == incoming_edge:
                 continue
-            if disc[v] == -1:
-                dfs(v, eidx)
-                low[u] = min(low[u], low[v])
-                if low[v] > disc[u]:
-                    bridges.add(eidx)
+            if discovery_time[neighbor] == -1:
+                dfs(neighbor, edge_index)
+                low[node] = min(low[node], low[neighbor])
+                if low[neighbor] > discovery_time[node]:
+                    bridges.add(edge_index)
             else:
-                low[u] = min(low[u], disc[v])
+                low[node] = min(low[node], discovery_time[neighbor])
 
     for start in range(num_nodes):
-        if disc[start] == -1:
+        if discovery_time[start] == -1:
             dfs(start, -1)
     return bridges
 
 
 def _reachable_leaves(edges, exclude_edge_idx, source, leaf_ids):
     """Leaves reachable from `source` in the graph with one edge removed."""
-    adj = defaultdict(list)
-    for idx, (u, v) in enumerate(edges):
-        if idx == exclude_edge_idx:
+    adjacency = defaultdict(list)
+    for edge_index, (u, v) in enumerate(edges):
+        if edge_index == exclude_edge_idx:
             continue
-        adj[u].append(v)
-        adj[v].append(u)
+        adjacency[u].append(v)
+        adjacency[v].append(u)
     seen = {source}
     stack = [source]
     while stack:
         x = stack.pop()
-        for y in adj[x]:
-            if y not in seen:
-                seen.add(y)
-                stack.append(y)
-    return {leaf_ids[nid] for nid in seen if nid in leaf_ids}
+        for neighbor in adjacency[x]:
+            if neighbor not in seen:
+                seen.add(neighbor)
+                stack.append(neighbor)
+    return {leaf_ids[node_id] for node_id in seen if node_id in leaf_ids}
+
+
+def _reference_taxon(all_leaves):
+    """Use OUT when present; otherwise choose a deterministic reference taxon."""
+    return "OUT" if "OUT" in all_leaves else min(all_leaves)
+
+
+def _canonical_split(side, all_leaves, reference_taxon):
+    """Represent a split by the side that excludes the reference taxon."""
+    other = all_leaves - side
+    return frozenset(other if reference_taxon in side else side)
+
+
+def _blob_nodes(edges, bridges):
+    """Nodes incident to a non-bridge edge are precisely the nodes in blobs."""
+    nodes = set()
+    for edge_index, (u, v) in enumerate(edges):
+        if edge_index not in bridges:
+            nodes.update((u, v))
+    return nodes
 
 
 def tree_of_blobs_splits(nwk):
@@ -192,22 +224,22 @@ def tree_of_blobs_splits(nwk):
       splits     : set of frozensets.  Each frozenset is one SIDE of a
                    non-trivial split, canonicalised as the side that does NOT
                    contain the outgroup 'OUT' (or, if 'OUT' is absent, the
-                   lexicographically smaller side).  Both sides have >= 2 taxa.
+                   lexicographically first taxon). Both sides have >= 2 taxa.
     """
     edges, leaf_names = parse_extended_newick(nwk)
     num_nodes = 1 + max((max(u, v) for u, v in edges), default=-1)
     all_leaves = frozenset(leaf_names.values())
-    ref = "OUT" if "OUT" in all_leaves else min(all_leaves)
+    reference_taxon = _reference_taxon(all_leaves)
 
     bridges = find_bridges(num_nodes, edges)
     splits = set()
-    for eidx in bridges:
-        u, v = edges[eidx]
-        side = _reachable_leaves(edges, eidx, v, leaf_names)
+    for edge_index in bridges:
+        _, v = edges[edge_index]
+        side = _reachable_leaves(edges, edge_index, v, leaf_names)
         other = all_leaves - side
         if len(side) < 2 or len(other) < 2:
             continue                          # trivial split
-        key = frozenset(other if ref in side else side)
+        key = _canonical_split(side, all_leaves, reference_taxon)
         splits.add(key)
     return all_leaves, splits
 
@@ -235,55 +267,56 @@ def split_blob_adjacency(nwk):
     edges, leaf_names = parse_extended_newick(nwk)
     num_nodes = 1 + max((max(u, v) for u, v in edges), default=-1)
     all_leaves = frozenset(leaf_names.values())
-    ref = "OUT" if "OUT" in all_leaves else min(all_leaves)
+    reference_taxon = _reference_taxon(all_leaves)
 
     bridges = find_bridges(num_nodes, edges)
-    blob_nodes = set()
-    for idx, (u, v) in enumerate(edges):
-        if idx not in bridges:
-            blob_nodes.add(u)
-            blob_nodes.add(v)
+    blob_nodes = _blob_nodes(edges, bridges)
 
     info = {}
-    for eidx in bridges:
-        u, v = edges[eidx]
-        side = _reachable_leaves(edges, eidx, v, leaf_names)
+    for edge_index in bridges:
+        u, v = edges[edge_index]
+        side = _reachable_leaves(edges, edge_index, v, leaf_names)
         other = all_leaves - side
         if len(side) < 2 or len(other) < 2:
             continue
-        key = frozenset(other if ref in side else side)
+        key = _canonical_split(side, all_leaves, reference_taxon)
         info[key] = (u in blob_nodes) or (v in blob_nodes)
     return all_leaves, info
 
 
 def leaf_blob_adjacency(nwk):
-    """Return {taxon: bool} where True means the leaf attaches directly to a
-    blob node (its pendant edge lands on a reticulation cycle)."""
+    """Return whether each leaf attaches directly to a blob node.
+
+    Equivalently, the leaf's pendant edge lands on a reticulation cycle.
+    """
     edges, leaf_names = parse_extended_newick(nwk)
     num_nodes = 1 + max((max(u, v) for u, v in edges), default=-1)
     bridges = find_bridges(num_nodes, edges)
-    blob_nodes = set()
-    for idx, (u, v) in enumerate(edges):
-        if idx not in bridges:
-            blob_nodes.add(u); blob_nodes.add(v)
-    # neighbour of each leaf
-    nbr = {}
+    blob_nodes = _blob_nodes(edges, bridges)
+
+    # Record the graph neighbor attached to each leaf.
+    leaf_neighbors = {}
     for u, v in edges:
         if u in leaf_names:
-            nbr[u] = v
+            leaf_neighbors[u] = v
         if v in leaf_names:
-            nbr[v] = u
-    return {leaf_names[nid]: (nbr.get(nid) in blob_nodes) for nid in leaf_names}
+            leaf_neighbors[v] = u
+    return {
+        leaf_names[node_id]: leaf_neighbors.get(node_id) in blob_nodes
+        for node_id in leaf_names
+    }
 
 
 if __name__ == "__main__":
     import os
     base = os.path.join(os.path.dirname(__file__), "..", "..", "data", "camus-dataset", "n15")
-    for d in sorted(os.listdir(base))[:5]:
-        net = os.path.join(base, d, "true_net.nwk")
+    for dataset in sorted(os.listdir(base))[:5]:
+        net = os.path.join(base, dataset, "true_net.nwk")
         if not os.path.exists(net):
             continue
-        leaves, splits = tree_of_blobs_splits(open(net).read())
-        print(f"n15/{d}: {len(leaves)} leaves, {len(splits)} non-trivial ToB splits")
-        for sp in sorted(splits, key=lambda s: (len(s), sorted(s))):
-            print("   ", "{" + ",".join(sorted(sp, key=lambda x: (len(x), x))) + "}")
+        with open(net) as network_file:
+            leaves, splits = tree_of_blobs_splits(network_file.read())
+        print(f"n15/{dataset}: {len(leaves)} leaves, {len(splits)} non-trivial ToB splits")
+        for split in sorted(splits, key=lambda side: (len(side), sorted(side))):
+            ordered_taxa = sorted(split, key=lambda taxon: (len(taxon), taxon))
+            print("   ", "{" + ",".join(ordered_taxa) + "}")

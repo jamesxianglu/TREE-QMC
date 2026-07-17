@@ -209,7 +209,7 @@ class SpeciesTree : public Tree {
         #if ENABLE_TOB
         std::string to_string_pvalue();
         std::string display_tree_pvalue(Node *root);
-        void run_split_experiment(std::vector<Tree *> &input, const std::unordered_map<std::string, index_t> &name2index, const std::string &bipartition_file, const std::string &output_file, double delta);
+        void run_split_experiment(std::vector<Tree *> &input, const std::unordered_map<std::string, index_t> &name2index, const std::string &bipartition_file, const std::string &output_file, double delta, double query_alpha);
         #endif  // ENABLE_TOB
     private:
         index_t artifinyms;
@@ -218,6 +218,9 @@ class SpeciesTree : public Tree {
         #if ENABLE_TOB
         std::unordered_map<quartet_t,weight_t> pvalues, pvalues_star;
         std::unordered_map<quartet_t, std::array<weight_t, 3>> qCFs_cache;
+        // Empirical oracle caches are isolated from the legacy T3/blob searches.
+        std::unordered_map<quartet_t, std::array<weight_t, 3>> row_sweep_qcfs_cache;
+        std::unordered_map<quartet_t, std::array<weight_t, 3>> row_sweep_t1_pvalues_cache;
         std::unordered_map<quartet_t, std::array<weight_t, 3>> qCFs_average_cache;
         #endif  // ENABLE_TOB
         index_t artifinym();
@@ -288,8 +291,8 @@ class SpeciesTree : public Tree {
         std::array<index_t, 2> siblings_in_two_best_topologies(const std::array<std::array<index_t,4>,2> &best2,
                                              index_t taxon);
         bool is_match_with_split(const std::array<weight_t,3>& qcf, index_t node_a1_id, index_t node_a2_id, index_t *indices);
-        bool query_pairs_together(std::vector<Tree *> &input, index_t x, index_t y, index_t rho, index_t r);
-        bool row_sweep_test_idx(std::vector<Tree *> &input, std::vector<index_t> &A, std::vector<index_t> &B, double delta);
+        bool query_pairs_together(std::vector<Tree *> &input, index_t x, index_t y, index_t rho, index_t r, double alpha);
+        bool row_sweep_test_idx(std::vector<Tree *> &input, std::vector<index_t> &A, std::vector<index_t> &B, double delta, double query_alpha);
         weight_t search_2f2a(std::vector<Tree *> &input, std::vector<Node *> &A, std::vector<Node *> &B, index_t* minimizer, size_t &split_match_count, size_t &split_mismatch_count); 
         #endif  // ENABLE_TOB
 };

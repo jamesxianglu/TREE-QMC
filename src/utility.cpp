@@ -143,6 +143,15 @@ weight_t pvalue(weight_t *qCF) {
     return *pvalue;
 }
 
+weight_t pvalue_t1(weight_t *qCF) {
+    // For MSCquartets' T1 test, qCF[0] is the count concordant with the
+    // particular species-quartet topology being tested.
+    SEXP a = RINS.parseEval("quartetTreeTest(c(" + std::to_string(qCF[0]) + "," + std::to_string(qCF[1]) + "," + std::to_string(qCF[2]) + "), \"T1\")");
+    SEXP b = VECTOR_ELT(a, 0);
+    double* pvalue = REAL(b);
+    return *pvalue;
+}
+
 weight_t pvalue_star(weight_t *qCF) {
     SEXP a = RINS.parseEval("quartetStarTest(c(" + std::to_string(qCF[0]) + "," + std::to_string(qCF[1]) + "," + std::to_string(qCF[2]) + "))");
     double* pvalue = REAL(a);

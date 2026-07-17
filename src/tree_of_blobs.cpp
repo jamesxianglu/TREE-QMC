@@ -1859,11 +1859,73 @@ SpeciesTree::SpeciesTree(Tree *input, Dict *dict, weight_t alpha, weight_t beta,
 }
 ///////////above is for net-cs //////////////////////////////////
 
-// Query(x,y,rho,r) == xy|rho r : one oracle call on the 4-taxon set {x,y,rho,r}
-bool SpeciesTree::query_pairs_together(std::vector<Tree *> &input, index_t x, index_t y, index_t rho, index_t r) {
-    index_t indices[4] = {x, y, rho, r};
-    auto [_, qcfs] = get_pvalue_and_qCFs(input, indices);
-    return is_match_with_split(qcfs, x, y, indices);
+// Map the requested pair (a,b) to its coordinate in the qCF array. After the
+// four taxa are sorted, qCF coordinates are 01|23, 02|13, and 03|12. This
+// also fixes the complementary pair, so it identifies the full quartet split.
+// This function only maps coordinates; it does not infer a topology.
+static int topology_for_pair(const index_t *sorted, index_t a, index_t b) {
+    const auto is_pair = [a, b](index_t u, index_t v) {
+        return (a == u && b == v) || (a == v && b == u);
+    };
+    if (is_pair(sorted[0], sorted[1]) || is_pair(sorted[2], sorted[3])) return 0;
+    if (is_pair(sorted[0], sorted[2]) || is_pair(sorted[1], sorted[3])) return 1;
+    if (is_pair(sorted[0], sorted[3]) || is_pair(sorted[1], sorted[2])) return 2;
+    return -1;
+}
+
+// Statistical stand-in for the oracle predicate Query(x,y,rho,r) == xy|rho r.
+// T1 tests this specific quartet tree, so its concordant qCF count must be
+// passed first. With observed quartets, true means "xy|rho r was not rejected
+// at alpha" and false means T1 rejected it. RowSweepTest treats false as a
+// contradiction. A rejection can reflect a 4-blob, a different tree topology,
+// or sampling error; it is not by itself a unique diagnosis of a 4-blob. An
+// exact oracle predicate returns false for a 4-blob, but this finite-sample T1
+// surrogate can fail to detect one.
+bool SpeciesTree::query_pairs_together(std::vector<Tree *> &input, index_t x,
+                                       index_t y, index_t rho, index_t r,
+                                       double alpha) {
+    index_t sorted[4] = {x, y, rho, r};
+    std::sort(sorted, sorted + 4);
+    for (int i = 1; i < 4; ++i) {
+        if (sorted[i - 1] == sorted[i]) return false;
+    }
+
+    const int target = topology_for_pair(sorted, x, y);
+    if (target < 0) return false;
+
+    const quartet_t quartet = join(sorted);
+    auto qcf_it = row_sweep_qcfs_cache.find(quartet);
+    if (qcf_it == row_sweep_qcfs_cache.end()) {
+        weight_t counts[3] = {0, 0, 0};
+        get_qCFs(input, sorted, counts);
+        qcf_it = row_sweep_qcfs_cache.emplace(
+            quartet, std::array<weight_t, 3>{counts[0], counts[1], counts[2]}
+        ).first;
+    }
+    const std::array<weight_t, 3> &qcfs = qcf_it->second;
+    // The oracle model always answers; its empirical surrogate cannot run T1
+    // when no input gene tree resolves this four-taxon set.
+    if (qcfs[0] + qcfs[1] + qcfs[2] == 0) return false;
+
+    auto p_it = row_sweep_t1_pvalues_cache.find(quartet);
+    if (p_it == row_sweep_t1_pvalues_cache.end()) {
+        const weight_t missing = std::numeric_limits<weight_t>::quiet_NaN();
+        p_it = row_sweep_t1_pvalues_cache.emplace(
+            quartet, std::array<weight_t, 3>{missing, missing, missing}
+        ).first;
+    }
+    weight_t &p = p_it->second[target];
+    if (std::isnan(p)) {
+        // T1 treats entry 0 as the specified species-tree topology; the two
+        // discordant topology counts may appear in either remaining order.
+        weight_t t1_counts[3] = {
+            qcfs[target], qcfs[(target + 1) % 3], qcfs[(target + 2) % 3]
+        };
+        p = pvalue_t1(t1_counts);
+    }
+
+    // MSCquartets marks p < alpha as a rejection of the specified T1 tree.
+    return p >= alpha;
 }
 
 // RowSweepTest(A, B, delta) -> true = ACCEPT, false = REJECT
@@ -1873,7 +1935,8 @@ bool SpeciesTree::query_pairs_together(std::vector<Tree *> &input, index_t x, in
 bool SpeciesTree::row_sweep_test_idx(std::vector<Tree *> &input,
                                      std::vector<index_t> &A,
                                      std::vector<index_t> &B,
-                                     double delta) {
+                                     double delta,
+                                     double query_alpha) {
     std::vector<index_t> &S = (A.size() >= B.size()) ? A : B;  // larger side
     std::vector<index_t> &R = (A.size() >= B.size()) ? B : A;  // smaller side
     const size_t s = S.size();
@@ -1891,7 +1954,11 @@ bool SpeciesTree::row_sweep_test_idx(std::vector<Tree *> &input,
             const index_t y = S[yi];
             for (size_t ri = 0; ri < r_free; ri++) {
                 const index_t r = R[ri + 1];
-                if (!query_pairs_together(input, x, y, rho, r)) {
+                // Count the empirical surrogate for q != xy|rho r. An exact
+                // 4-blob answer belongs here; with observations, it is counted
+                // when T1 detects the contradiction. No-data queries are also
+                // treated as false.
+                if (!query_pairs_together(input, x, y, rho, r, query_alpha)) {
                     c[xi][ri]++;
                     c[yi][ri]++;
                 }
@@ -1934,7 +2001,8 @@ void SpeciesTree::run_split_experiment(std::vector<Tree *> &input,
         const std::unordered_map<std::string, index_t> &name2index,
         const std::string &bipartition_file,
         const std::string &output_file,
-        double delta) {
+        double delta,
+        double query_alpha) {
     add_r_libpaths_and_load(RINS);                 // load MSCquartets before any pvalue() call
     for (Tree *t : input) t->LCA_preprocessing();  // required by get_quartet()
     std::ifstream fin(bipartition_file);
@@ -1959,7 +2027,7 @@ void SpeciesTree::run_split_experiment(std::vector<Tree *> &input,
         if (id == "id") continue;                       // header
         std::vector<index_t> A = row_sweep_parse_side(aField, name2index);
         std::vector<index_t> B = row_sweep_parse_side(bField, name2index);
-        bool accept = row_sweep_test_idx(input, A, B, delta);
+        bool accept = row_sweep_test_idx(input, A, B, delta, query_alpha);
         fout << id << "\t" << (accept ? 1 : 0) << "\n";
     }
     fin.close();
