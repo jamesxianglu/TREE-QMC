@@ -129,6 +129,8 @@ const std::string help_info =
 "        Compute the tree of blobs from the input gene trees\n"
 "[(--store_pvalue)]\n"
 "        Store min p-value found for each branch, then exit\n"
+"[(--write_qcfs) <table file>]\n"
+"        Write qCF counts for quartets evaluated by the blob search to CSV\n"
 "[(--3f1a)]\n"
 "        Use 3-fix-1-alter algorithm for minimum p-value search\n"
 "[(--iter_limit_blob) <non-negative integer>]\n"

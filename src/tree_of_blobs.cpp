@@ -1,8 +1,10 @@
 #if ENABLE_TOB
 #include "tree.hpp"
+#include "qcf_writer.hpp"
 #include "rlib_dirs.hpp"
 #include <random>
 #include <algorithm>
+#include <memory>
 
 void get_qCFs(std::vector<Tree *> &input, index_t *indices, weight_t *qCFs) {
     index_t temp[4];
@@ -1905,7 +1907,7 @@ bool SpeciesTree::query_pairs_together(std::vector<Tree *> &input, index_t x,
     const std::array<weight_t, 3> &qcfs = qcf_it->second;
     // The oracle model always answers; its empirical surrogate cannot run T1
     // when no input gene tree resolves this four-taxon set.
-    if (qcfs[0] + qcfs[1] + qcfs[2] == 0) return false;
+    if (qcfs[0] + qcfs[1] + qcfs[2] == 0) return false;//todo, is this valid?
 
     auto p_it = row_sweep_t1_pvalues_cache.find(quartet);
     if (p_it == row_sweep_t1_pvalues_cache.end()) {
@@ -2036,7 +2038,8 @@ void SpeciesTree::run_split_experiment(std::vector<Tree *> &input,
 }
 
 // 2f2a search algorithm O(n^3)
-SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict, SpeciesTree* display) {
+SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
+                         SpeciesTree* display, QCFWriter *qcf_writer) {
     std::cout << "Constructing tree of blobs using 2-fix-2-alter search" << std::endl;
 
     add_r_libpaths_and_load(RINS);
@@ -2080,7 +2083,9 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict, SpeciesTree* di
         std::cout << "]" << std::endl;
 
 
-        min = search_2f2a(input, bips[i].first, bips[i].second, minimizer, split_match_count, split_mismatch_count);
+        min = search_2f2a(input, bips[i].first, bips[i].second,
+                          minimizer, split_match_count, split_mismatch_count,
+                          static_cast<index_t>(i), qcf_writer);
         internal[i]->min_pvalue = min;
 
         // Get qCFs that yielded the min p-value
@@ -2138,10 +2143,15 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                          unsigned long int iter_limit_blob, 
                          bool three_fix_one_alter,
                          bool two_fix_two_alter, 
-                         bool is_quard) {
+                         bool is_quard,
+                         const std::string &output_qcfs_table_file) {
+    std::unique_ptr<QCFWriter> qcf_writer;
+    if (!output_qcfs_table_file.empty()) {
+        qcf_writer = std::make_unique<QCFWriter>(output_qcfs_table_file, dict);
+    }
     
     if (!three_fix_one_alter && !is_quard && !two_fix_two_alter) {
-       SpeciesTree(input, dict, display, iter_limit_blob);
+       SpeciesTree(input, dict, display, iter_limit_blob, qcf_writer.get());
        return;
     }
 
@@ -2156,7 +2166,7 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
     }
 
     if (two_fix_two_alter) {
-        SpeciesTree(input, dict, display);
+        SpeciesTree(input, dict, display, qcf_writer.get());
         return;
     }
     
@@ -2201,10 +2211,10 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
         size_t mismatch_count = 0;
         if (three_fix_one_alter) {
             
-            min = search_3f1a(input, &quads[i], minimizer);
+            min = search_3f1a(input, &quads[i], minimizer, i, qcf_writer.get());
         }   
         else if (is_quard)
-            min = search_quard(input, &quads[i], minimizer);
+            min = search_quard(input, &quads[i], minimizer, i, qcf_writer.get());
         internal[i]->min_pvalue = min;
 
         // Get qCFs that yielded the min p-value
@@ -2256,7 +2266,8 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
 // O(n*cn*klogn), O(kn^3logn) if c is O(n)
 SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict, 
                          SpeciesTree* display,
-                         unsigned long int iter_limit_blob) {
+                         unsigned long int iter_limit_blob,
+                         QCFWriter *qcf_writer) {
     std::cout << "Constructing tree of blobs" << std::endl;
     add_r_libpaths_and_load(RINS);
     for (Tree *t : input) t->LCA_preprocessing();
@@ -2287,9 +2298,11 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
         weight_t min;
         index_t minimizer[4];
         if (iter_limit != 0)
-            min = search(input, bips[i].first, bips[i].second, iter_limit, minimizer);
+            min = search(input, bips[i].first, bips[i].second, iter_limit,
+                         minimizer, static_cast<index_t>(i), qcf_writer);
         else
-            min = search(input, bips[i].first, bips[i].second, minimizer);
+            min = search(input, bips[i].first, bips[i].second, minimizer,
+                         static_cast<index_t>(i), qcf_writer);
         internal[i]->min_pvalue = min;
 
         // Get qCFs that yielded the min p-value
@@ -2537,7 +2550,9 @@ std::string Tree::display_quardpartitions(std::vector<Node *> &A, std::vector<No
 weight_t SpeciesTree::search(std::vector<Tree *> &input, 
                              std::vector<Node *> &A, 
                              std::vector<Node *> &B, 
-                             index_t* minimizer) {
+                             index_t* minimizer,
+                             index_t branch_id,
+                             QCFWriter *qcf_writer) {
     index_t i[4];
     weight_t min = -1;
     size_t count = 0;
@@ -2552,7 +2567,9 @@ weight_t SpeciesTree::search(std::vector<Tree *> &input,
                     temp[3] = B[i[3]]->index;
                     count ++;
 
-                    weight_t score = get_pvalue(input, temp);
+                    auto [score, qcfs] = get_pvalue_and_qCFs(
+                        input, temp, branch_id, qcf_writer
+                    );
                     if (min < 0 || score < min) {
                         min = score;
                         minimizer[0] = temp[0]; 
@@ -2569,7 +2586,7 @@ weight_t SpeciesTree::search(std::vector<Tree *> &input,
 }
 
 
-weight_t SpeciesTree::search_quard(std::vector<Tree *> &input, std::tuple<std::vector<Node *>, std::vector<Node *>, std::vector<Node *>, std::vector<Node *>> *quad, index_t* minimizer) {
+weight_t SpeciesTree::search_quard(std::vector<Tree *> &input, std::tuple<std::vector<Node *>, std::vector<Node *>, std::vector<Node *>, std::vector<Node *>> *quad, index_t* minimizer, index_t branch_id, QCFWriter *qcf_writer) {
     index_t i[4] = {0, 0, 0, 0};
     weight_t min = -1;
     auto& t = *quad;
@@ -2583,7 +2600,9 @@ weight_t SpeciesTree::search_quard(std::vector<Tree *> &input, std::tuple<std::v
                     temp[1] = std::get<1>(t)[i[1]]->index;
                     temp[2] = std::get<2>(t)[i[2]]->index;
                     temp[3] = std::get<3>(t)[i[3]]->index;
-                    weight_t score = get_pvalue(input, temp);
+                    auto [score, qcfs] = get_pvalue_and_qCFs(
+                        input, temp, branch_id, qcf_writer
+                    );
                     if (min < 0 || score < min) {
                         min = score;
                         minimizer[0] = temp[0]; minimizer[1] = temp[1]; minimizer[2] = temp[2]; minimizer[3] = temp[3];
@@ -2790,7 +2809,9 @@ std::array<weight_t,3> SpeciesTree::freq_three_toplogies(const std::vector<Tree*
 weight_t SpeciesTree::search_quard_heuristic(std::vector<Tree *> &input,
                                             std::vector<std::vector<index_t>> &quad,
                                             unsigned long int iter_limit,
-                                            index_t *minimizer) {
+                                            index_t *minimizer,
+                                            index_t branch_id,
+                                            QCFWriter *qcf_writer) {
     index_t indices[4];
     weight_t min = -1;
     size_t count = 0;
@@ -2808,7 +2829,9 @@ weight_t SpeciesTree::search_quard_heuristic(std::vector<Tree *> &input,
 
         weight_t old_min = min;
 
-        count += neighbor_search_quard(input, quad, indices, &min);
+        count += neighbor_search_quard(
+            input, quad, indices, &min, branch_id, qcf_writer
+        );
 
         if (old_min < 0 || min < old_min) {
             minimizer[0] = indices[0];
@@ -2912,8 +2935,12 @@ size_t SpeciesTree::neighbor_search_quard(std::unordered_map<quartet_t, std::arr
 size_t SpeciesTree::neighbor_search_quard(std::vector<Tree *> &input,
                                          std::vector<std::vector<index_t>> &quad,
                                          index_t *current,
-                                         weight_t *min) {
-    auto [current_score, _] = get_pvalue_and_qCFs(input, current);
+                                         weight_t *min,
+                                         index_t branch_id,
+                                         QCFWriter *qcf_writer) {
+    auto [current_score, current_qcfs] = get_pvalue_and_qCFs(
+        input, current, branch_id, qcf_writer
+    );
     size_t k = 1;
 
     while (true) {
@@ -2929,7 +2956,9 @@ size_t SpeciesTree::neighbor_search_quard(std::vector<Tree *> &input,
                 if (new_index == current[d]) continue;
 
                 temp[d] = new_index;
-                auto [temp_score, _] = get_pvalue_and_qCFs(input, temp);
+                auto [temp_score, temp_qcfs] = get_pvalue_and_qCFs(
+                    input, temp, branch_id, qcf_writer
+                );
                 ++k;
 
                 if (temp_score >= 0 && temp_score < best_next_score) {
@@ -2963,7 +2992,7 @@ size_t SpeciesTree::neighbor_search_quard(std::vector<Tree *> &input,
 
 
 
-weight_t SpeciesTree::search_3f1a(std::vector<Tree *> &input, std::tuple<std::vector<Node *>, std::vector<Node *>, std::vector<Node *>, std::vector<Node *>> *quad, index_t* minimizer) {
+weight_t SpeciesTree::search_3f1a(std::vector<Tree *> &input, std::tuple<std::vector<Node *>, std::vector<Node *>, std::vector<Node *>, std::vector<Node *>> *quad, index_t* minimizer, index_t branch_id, QCFWriter *qcf_writer) {
     index_t i[4] = {0, 0, 0, 0};
     weight_t min = -1;
     
@@ -3014,8 +3043,9 @@ weight_t SpeciesTree::search_3f1a(std::vector<Tree *> &input, std::tuple<std::ve
             //     }
             // }
 
-            weight_t score = get_pvalue(input, cur_quart);
-            // auto [score, qcfs] = get_pvalue_and_qCFs(input, cur_quart);
+            auto [score, qcfs] = get_pvalue_and_qCFs(
+                input, cur_quart, branch_id, qcf_writer
+            );
             
             
             if (min < 0 || score < min) {
@@ -3054,7 +3084,7 @@ bool SpeciesTree::is_match_with_split(const std::array<weight_t,3>& qcfs, index_
 }
 
 
-weight_t SpeciesTree::search_2f2a(std::vector<Tree *> &input, std::vector<Node *> &A, std::vector<Node *> &B, index_t* minimizer, size_t &split_match_count, size_t &split_mismatch_count) {
+weight_t SpeciesTree::search_2f2a(std::vector<Tree *> &input, std::vector<Node *> &A, std::vector<Node *> &B, index_t* minimizer, size_t &split_match_count, size_t &split_mismatch_count, index_t branch_id, QCFWriter *qcf_writer) {
     index_t i[4];
     weight_t min = -1;
     i[0] = 0; i[2] = 0;
@@ -3065,7 +3095,9 @@ weight_t SpeciesTree::search_2f2a(std::vector<Tree *> &input, std::vector<Node *
                     temp[1] = A[i[1]]->index;
                     temp[2] = B[i[2]]->index;
                     temp[3] = B[i[3]]->index;
-                    auto [score, qcfs] = get_pvalue_and_qCFs(input, temp);
+                    auto [score, qcfs] = get_pvalue_and_qCFs(
+                        input, temp, branch_id, qcf_writer
+                    );
                     if (is_match_with_split(qcfs, A[i[0]]->index, A[i[1]]->index, temp)) {
                         split_match_count++;
                     } else {
@@ -3115,7 +3147,9 @@ weight_t SpeciesTree::search(std::vector<Tree *> &input,
                              std::vector<Node *> &A,
                              std::vector<Node *> &B,
                              size_t iter_limit,
-                             index_t* minimizer) {
+                             index_t* minimizer,
+                             index_t branch_id,
+                             QCFWriter *qcf_writer) {
     index_t indices[4];
     weight_t min = -1;
     size_t count = 0;
@@ -3128,7 +3162,9 @@ weight_t SpeciesTree::search(std::vector<Tree *> &input,
         
         weight_t old_min = min;
 
-        count += neighbor_search(input, A, B, indices, &min);
+        count += neighbor_search(
+            input, A, B, indices, &min, branch_id, qcf_writer
+        );
 
         if (min < old_min || old_min < 0) {
             minimizer[0] = indices[0]; minimizer[1] = indices[1]; minimizer[2] = indices[2]; minimizer[3] = indices[3];
@@ -3141,9 +3177,11 @@ weight_t SpeciesTree::search(std::vector<Tree *> &input,
     return min;
 }
 
-weight_t SpeciesTree::neighbor_search(std::vector<Tree *> &input, std::vector<Node *> &A, std::vector<Node *> &B, index_t *current, weight_t *min) {
+weight_t SpeciesTree::neighbor_search(std::vector<Tree *> &input, std::vector<Node *> &A, std::vector<Node *> &B, index_t *current, weight_t *min, index_t branch_id, QCFWriter *qcf_writer) {
     weight_t current_f[3];
-    weight_t current_score = get_pvalue(input, current);
+    weight_t current_score = get_pvalue_and_qCFs(
+        input, current, branch_id, qcf_writer
+    ).first;
     size_t k = 1;
     while (true) {
         index_t temp[4], next[4];
@@ -3154,7 +3192,9 @@ weight_t SpeciesTree::neighbor_search(std::vector<Tree *> &input, std::vector<No
             index_t new_index = A[i]->index;
             if (new_index == current[0] || new_index == current[1]) continue;
             temp[0] = new_index;
-            temp_score = get_pvalue(input, temp); k ++;
+            temp_score = get_pvalue_and_qCFs(
+                input, temp, branch_id, qcf_writer
+            ).first; k ++;
             if (next_score < 0 || temp_score < next_score) {
                 next_score = temp_score;
                 for (index_t j = 0; j < 4; j ++) 
@@ -3163,7 +3203,9 @@ weight_t SpeciesTree::neighbor_search(std::vector<Tree *> &input, std::vector<No
             }
             temp[0] = current[0];
             temp[1] = new_index;
-            temp_score = get_pvalue(input, temp); k ++;
+            temp_score = get_pvalue_and_qCFs(
+                input, temp, branch_id, qcf_writer
+            ).first; k ++;
             if (next_score < 0 || temp_score < next_score) {
                 next_score = temp_score;
                 for (index_t j = 0; j < 4; j ++) 
@@ -3176,7 +3218,9 @@ weight_t SpeciesTree::neighbor_search(std::vector<Tree *> &input, std::vector<No
             index_t new_index = B[i]->index;
             if (new_index == current[2] || new_index == current[3]) continue;
             temp[2] = new_index;
-            temp_score = get_pvalue(input, temp); k ++;
+            temp_score = get_pvalue_and_qCFs(
+                input, temp, branch_id, qcf_writer
+            ).first; k ++;
             if (next_score < 0 || temp_score < next_score) {
                 next_score = temp_score;
                 for (index_t j = 0; j < 4; j ++) 
@@ -3185,7 +3229,9 @@ weight_t SpeciesTree::neighbor_search(std::vector<Tree *> &input, std::vector<No
             }
             temp[2] = current[2];
             temp[3] = new_index;
-            temp_score = get_pvalue(input, temp); k ++;
+            temp_score = get_pvalue_and_qCFs(
+                input, temp, branch_id, qcf_writer
+            ).first; k ++;
             if (next_score < 0 || temp_score < next_score) {
                 next_score = temp_score;
                 for (index_t j = 0; j < 4; j ++) 
@@ -3290,7 +3336,11 @@ weight_t SpeciesTree::neighbor_search_star(std::vector<Tree *> &input, std::vect
 // the get_quartet will return the index = the index of sibling of the 0 index in indices - 1 in the indices array, 
 // here we alway gonna passing the hybrid to the index of 0 in the indices array, 
 // thus we can easily identify the sibilibing of hybrid in the displayed toplogy 
-std::pair<weight_t, std::array<weight_t, 3>> SpeciesTree::get_pvalue_and_qCFs(std::vector<Tree *> &input, index_t *indices) {
+std::pair<weight_t, std::array<weight_t, 3>> SpeciesTree::get_pvalue_and_qCFs(
+        std::vector<Tree *> &input,
+        index_t *indices,
+        index_t branch_id,
+        QCFWriter *qcf_writer) {
     
     index_t temp[4];
     for (index_t i = 0; i < 4; i ++) 
@@ -3312,7 +3362,11 @@ std::pair<weight_t, std::array<weight_t, 3>> SpeciesTree::get_pvalue_and_qCFs(st
         qCFs_cache[q] = {qCF[0], qCF[1], qCF[2]}; // main the global qCFs map
     }
 
-    return {pvalues[q], qCFs_cache[q]};
+    const std::array<weight_t, 3> &qcfs = qCFs_cache.at(q);
+    if (qcf_writer != nullptr) {
+        qcf_writer->write(branch_id, temp, qcfs);
+    }
+    return {pvalues.at(q), qcfs};
 }
 
 std::pair<weight_t, std::array<weight_t, 3>> SpeciesTree::get_pvalue_and_qCFs(std::unordered_map<quartet_t, std::array<weight_t, 3>> &qCFs_table, index_t *indices) {
@@ -3498,7 +3552,7 @@ index_t Tree::get_quartet(index_t *indices) {
     for (index_t i = 0; i < 4; i ++) {
         for (index_t j = i + 1; j < 4; j ++) {
             // Node *a = LCA_naive(leaves[i], leaves[j]);
-            Node *a = LCA_fast(leaves[i], leaves[j]); 
+            Node *a = LCA_via_rmq(leaves[i], leaves[j]);
             if (lowest == NULL || a->depth > lowest->depth) {
                 lowest = a;
                 lowest_count = 0;
@@ -3516,9 +3570,7 @@ index_t Tree::get_quartet(index_t *indices) {
 }
 
 void Tree::LCA_preprocessing() {
-    std::vector<Node *> stack;
-    stack.push_back(root);
-    LCA_depth_first_search(root, stack);
+    LCA_preprocessing_with_ett_rmq_sparse_table();
 }
 
 void Tree::LCA_depth_first_search(Node *root, std::vector<Node *> &stack) {

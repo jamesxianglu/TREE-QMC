@@ -930,3 +930,91 @@ void Tree::reroot_on_edge_above_node(Node *node) {
         stack.pop();
     }
 }
+
+void Tree::LCA_euler_dfs(Node *node, index_t depth) {
+    node->depth = depth;
+
+    if (lca_first_occurrence.find(node) == lca_first_occurrence.end()) {
+        lca_first_occurrence[node] = lca_euler.size();
+    }
+
+    lca_euler.push_back(node);
+    lca_euler_depth.push_back(depth);
+
+    for (Node *child : node->children) {
+        LCA_euler_dfs(child, depth + 1);
+        lca_euler.push_back(node);
+        lca_euler_depth.push_back(depth);
+    }
+}
+
+void Tree::LCA_preprocessing_with_ett_rmq_sparse_table() {
+    lca_euler.clear();
+    lca_euler_depth.clear();
+    lca_first_occurrence.clear();
+    lca_log2.clear();
+    lca_sparse_table.clear();
+
+    if (root == nullptr) {
+        return;
+    }
+
+    LCA_euler_dfs(root, 0);
+    const std::size_t size = lca_euler.size();
+    if (size == 0) {
+        return;
+    }
+
+    lca_log2.resize(size + 1, 0);
+    for (std::size_t i = 2; i <= size; ++i) {
+        lca_log2[i] = lca_log2[i / 2] + 1;
+    }
+
+    const std::size_t levels = lca_log2[size] + 1;
+    lca_sparse_table.assign(levels, std::vector<std::size_t>(size));
+    for (std::size_t i = 0; i < size; ++i) {
+        lca_sparse_table[0][i] = i;
+    }
+
+    for (std::size_t level = 1; level < levels; ++level) {
+        const std::size_t interval_length = std::size_t{1} << level;
+        const std::size_t half_length = interval_length >> 1;
+        for (std::size_t i = 0; i + interval_length <= size; ++i) {
+            const std::size_t left = lca_sparse_table[level - 1][i];
+            const std::size_t right =
+                lca_sparse_table[level - 1][i + half_length];
+            lca_sparse_table[level][i] =
+                lca_euler_depth[left] <= lca_euler_depth[right] ? left : right;
+        }
+    }
+}
+
+Node *Tree::LCA_via_rmq(Node *x, Node *y) const {
+    if (x == nullptr || y == nullptr) {
+        return nullptr;
+    }
+
+    const auto x_it = lca_first_occurrence.find(x);
+    const auto y_it = lca_first_occurrence.find(y);
+    if (x_it == lca_first_occurrence.end() ||
+        y_it == lca_first_occurrence.end()) {
+        return nullptr;
+    }
+
+    std::size_t left = x_it->second;
+    std::size_t right = y_it->second;
+    if (left > right) {
+        std::swap(left, right);
+    }
+
+    const std::size_t interval_length = right - left + 1;
+    const std::size_t level = lca_log2[interval_length];
+    const std::size_t block_length = std::size_t{1} << level;
+    const std::size_t first = lca_sparse_table[level][left];
+    const std::size_t second =
+        lca_sparse_table[level][right - block_length + 1];
+
+    return lca_euler_depth[first] <= lca_euler_depth[second]
+        ? lca_euler[first]
+        : lca_euler[second];
+}

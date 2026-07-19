@@ -11,6 +11,7 @@ Instance::Instance(int argc, char **argv) {
     mapping_file = "";
     stree_file = "";
     table_file = "";
+    output_qcfs_table_file = "";
     rowsweep_file = "";
     rowsweep_out_file = "";
     rowsweep_delta = 0.0;
@@ -244,7 +245,7 @@ long long Instance::solve() {
                     std::cout << "Setting blob iteration limit to 2*ntaxa^2 = " << iter_limit_blob << std::endl;
                 }
             }
-            SpeciesTree* display = new SpeciesTree(input, dict, output, iter_limit_blob, three_fix_one_alter, two_fix_two_alter, quard);
+            SpeciesTree* display = new SpeciesTree(input, dict, output, iter_limit_blob, three_fix_one_alter, two_fix_two_alter, quard, output_qcfs_table_file);
             delete display;
             std::cout << "Printing output tree with pvalues:" << std::endl;
             std::cout << output->to_string_pvalue() << std::endl;
@@ -452,6 +453,15 @@ int Instance::parse(int argc, char **argv) {
         }
         else if (opt == "--quard") {
             quard = true;
+        }
+        else if (opt == "--write_qcfs") {
+            if (i < argc - 1) {
+                output_qcfs_table_file = argv[++ i];
+            }
+            else {
+                std::cout << "\nERROR: No output qCF table file specified" << std::endl;
+                return 2;
+            }
         }
         else if (opt == "--alpha") {
             alpha = std::stod(argv[++ i]);
@@ -757,6 +767,8 @@ int Instance::parse(int argc, char **argv) {
     if (mapping_file != "") std::cout << "mapping file: " << mapping_file << std::endl;
     if (stree_file != "") std::cout << "species tree file: " << stree_file << std::endl;
     if (table_file != "") std::cout << "table file: " << table_file << std::endl;
+    if (output_qcfs_table_file != "")
+        std::cout << "qCF table file: " << output_qcfs_table_file << std::endl;
     if (rowsweep_file != "") {
         std::cout << "row-sweep query alpha: " << rowsweep_query_alpha << std::endl;
     }

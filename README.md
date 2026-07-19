@@ -136,6 +136,8 @@ Tree of Blobs Options:
         Compute the tree of blobs from the input gene trees
 [(--store_pvalue)]
         Store min p-value found for each branch, then exit
+[(--write_qcfs) <table file>]
+        Write qCF counts for quartets evaluated by the blob search to CSV
 [(--3f1a)]
         Use 3-fix-1-alter algorithm for minimum p-value search
 [(--iter_limit_blob) <non-negative integer>]

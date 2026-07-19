@@ -31,6 +31,7 @@ class Instance {
         std::unordered_map<std::string, std::string> indiv2taxon;
         std::string root_str, quartet_format;
         std::string input_file, output_file, mapping_file, stree_file, table_file; //, pvalue_file;
+        std::string output_qcfs_table_file;
         std::string rowsweep_file, rowsweep_out_file;
         weight_t rowsweep_delta, rowsweep_query_alpha;
         std::string annotation_tree_file;

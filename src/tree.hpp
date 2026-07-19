@@ -6,6 +6,7 @@
 #include "taxa.hpp"
 #include <tuple>
 
+class QCFWriter;
 
 class Node {
     friend class Network;
@@ -115,6 +116,12 @@ class Tree {
         weight_t total_quartet_weight;
         index_t pseudonyms;
         std::unordered_map<index_t, index_t> indices;
+        std::vector<Node *> lca_euler;
+        std::vector<index_t> lca_euler_depth;
+        std::unordered_map<Node *, std::size_t> lca_first_occurrence;
+        std::vector<std::size_t> lca_log2;
+        std::vector<std::vector<std::size_t>> lca_sparse_table;
+        void LCA_euler_dfs(Node *node, index_t depth);
         void clear_states(Node *root);
         void build_states(Node *root, Taxa &subset);
         void depth(Node *root, index_t depth);
@@ -173,6 +180,8 @@ class Tree {
         weight_t total_weight_bf();
         void LCA_preprocessing();
         void LCA_depth_first_search(Node *root, std::vector<Node *> &stack);
+        void LCA_preprocessing_with_ett_rmq_sparse_table();
+        Node *LCA_via_rmq(Node *x, Node *y) const;
         Node *LCA_fast(Node *x, Node *y);
         Node *LCA_naive(Node *a, Node *b);
 };
@@ -184,9 +193,9 @@ class SpeciesTree : public Tree {
         SpeciesTree(std::string stree_file, Dict *dict);
         #if ENABLE_TOB
         SpeciesTree(Tree *input, Dict *dict, weight_t alpha, weight_t beta, bool enable_split_test);
-        SpeciesTree(std::vector<Tree *> &input, Dict *dict, SpeciesTree* display);
-        SpeciesTree(std::vector<Tree *> &input, Dict *dict, SpeciesTree* display, unsigned long int iter_limit_blob);
-        SpeciesTree(std::vector<Tree *> &input, Dict *dict, SpeciesTree* display, unsigned long int iter_limit_blob, bool three_fix_one_alter, bool two_fix_two_alter, bool is_quard);
+        SpeciesTree(std::vector<Tree *> &input, Dict *dict, SpeciesTree* display, QCFWriter *qcf_writer = nullptr);
+        SpeciesTree(std::vector<Tree *> &input, Dict *dict, SpeciesTree* display, unsigned long int iter_limit_blob, QCFWriter *qcf_writer = nullptr);
+        SpeciesTree(std::vector<Tree *> &input, Dict *dict, SpeciesTree* display, unsigned long int iter_limit_blob, bool three_fix_one_alter, bool two_fix_two_alter, bool is_quard, const std::string &output_qcfs_table_file = "");
         SpeciesTree(Tree *input, Dict *dict, weight_t alpha, weight_t beta, std::vector<Tree *> &gene_trees, unsigned long int iter_limit_blob);
         SpeciesTree(Tree *input, Dict *dict, weight_t alpha, weight_t beta, std::unordered_map<quartet_t, std::array<weight_t, 3>> &qCFs_table, unsigned long int iter_limit_blob);
         void hybrid_voting(std::vector<Tree *> &gene_trees,Dict *dict, Node * hybrid_blob, unsigned long int iter_limit, std::vector<std::unordered_set<index_t>> &banned_buckets);
@@ -234,20 +243,22 @@ class SpeciesTree : public Tree {
         std::string display_tree_annotated(Node *root, std::string brln_mode);
         void write_support_table_row(Node *root, std::ostream &os, std::string brln_mode);
         #if ENABLE_TOB
-        weight_t search(std::vector<Tree *> &input, std::vector<Node *> &A, std::vector<Node *> &B, size_t iter_limit, index_t *minimizer);
+        weight_t search(std::vector<Tree *> &input, std::vector<Node *> &A, std::vector<Node *> &B, size_t iter_limit, index_t *minimizer, index_t branch_id = 0, QCFWriter *qcf_writer = nullptr);
         weight_t search_star(std::vector<Tree *> &input, std::vector<Node *> &A, std::vector<Node *> &B, size_t iter_limit);
-        weight_t neighbor_search(std::vector<Tree *> &input, std::vector<Node *> &A, std::vector<Node *> &B, index_t *current, weight_t *min);
+        weight_t neighbor_search(std::vector<Tree *> &input, std::vector<Node *> &A, std::vector<Node *> &B, index_t *current, weight_t *min, index_t branch_id = 0, QCFWriter *qcf_writer = nullptr);
         weight_t neighbor_search_star(std::vector<Tree *> &input, std::vector<Node *> &A, std::vector<Node *> &B, index_t *current, weight_t *min);
-        weight_t search(std::vector<Tree *> &input, std::vector<Node *> &A, std::vector<Node *> &B, index_t *minimizer);
+        weight_t search(std::vector<Tree *> &input, std::vector<Node *> &A, std::vector<Node *> &B, index_t *minimizer, index_t branch_id = 0, QCFWriter *qcf_writer = nullptr);
         weight_t search_star(std::vector<Tree *> &input, std::vector<Node *> &A, std::vector<Node *> &B);
-        weight_t search_3f1a(std::vector<Tree *> &input, std::tuple<std::vector<Node *>, std::vector<Node *>, std::vector<Node *>, std::vector<Node *>> *quad, index_t* minimizer);
-        weight_t search_quard(std::vector<Tree *> &input, std::tuple<std::vector<Node *>, std::vector<Node *>, std::vector<Node *>, std::vector<Node *>> *quad, index_t* minimizer);
+        weight_t search_3f1a(std::vector<Tree *> &input, std::tuple<std::vector<Node *>, std::vector<Node *>, std::vector<Node *>, std::vector<Node *>> *quad, index_t* minimizer, index_t branch_id = 0, QCFWriter *qcf_writer = nullptr);
+        weight_t search_quard(std::vector<Tree *> &input, std::tuple<std::vector<Node *>, std::vector<Node *>, std::vector<Node *>, std::vector<Node *>> *quad, index_t* minimizer, index_t branch_id = 0, QCFWriter *qcf_writer = nullptr);
         weight_t search_quard(std::vector<Tree *> &input, std::vector<std::vector<index_t>> &quad, index_t* minimizer);
         
         size_t neighbor_search_quard(std::vector<Tree *> &input,
                                          std::vector<std::vector<index_t>> &quad,
                                          index_t *current,
-                                         weight_t *min);
+                                         weight_t *min,
+                                         index_t branch_id = 0,
+                                         QCFWriter *qcf_writer = nullptr);
         size_t neighbor_search_quard(std::unordered_map<quartet_t, std::array<weight_t, 3>> &qCFs_table,
                                          std::vector<std::vector<index_t>> &quad,
                                          index_t *current,
@@ -255,7 +266,9 @@ class SpeciesTree : public Tree {
         weight_t search_quard_heuristic(std::vector<Tree *> &input,
                                             std::vector<std::vector<index_t>> &quad,
                                             size_t iter_limit,
-                                            index_t *minimizer);
+                                            index_t *minimizer,
+                                            index_t branch_id = 0,
+                                            QCFWriter *qcf_writer = nullptr);
         weight_t search_quard_heuristic(std::unordered_map<quartet_t, std::array<weight_t, 3>> &qCFs_table,
                                             std::vector<std::vector<index_t>> &quad,
                                             unsigned long int iter_limit,
@@ -283,7 +296,7 @@ class SpeciesTree : public Tree {
         std::vector<index_t > compute_taxon2parition_mapping(std::vector<Tree *> &input,Node *root, Dict *dict, std::vector<Node *> &hybrid_blob_nodes, std::unordered_set<Node *> & full_leaf_indices, unsigned long int iter_limit_blob, weight_t alpha);
         std::vector<index_t> compute_taxon2parition_mapping(std::unordered_map<quartet_t, std::array<weight_t, 3>> &qCFs_table, Node *root, Dict *dict, std::vector<Node *> &hybrid_blob_nodes, std::unordered_set<Node *> & full_leaf_nodes, unsigned long int iter_limit_blob, weight_t alpha);
         // for network circle sorting
-        std::pair<weight_t, std::array<weight_t, 3>> get_pvalue_and_qCFs(std::vector<Tree *> &input, index_t *indices);
+        std::pair<weight_t, std::array<weight_t, 3>> get_pvalue_and_qCFs(std::vector<Tree *> &input, index_t *indices, index_t branch_id = 0, QCFWriter *qcf_writer = nullptr);
         std::pair<weight_t, std::array<weight_t, 3>> get_pvalue_and_qCFs(std::unordered_map<quartet_t, std::array<weight_t, 3>> &qCFs_table, index_t *indices);
         std::array<std::array<index_t, 4>, 2> computed_displayed_quartet_toplogy(index_t *indices);
         std::array<std::array<index_t, 4>, 2> computed_displayed_quartet_toplogy(index_t *indices,
@@ -293,7 +306,7 @@ class SpeciesTree : public Tree {
         bool is_match_with_split(const std::array<weight_t,3>& qcf, index_t node_a1_id, index_t node_a2_id, index_t *indices);
         bool query_pairs_together(std::vector<Tree *> &input, index_t x, index_t y, index_t rho, index_t r, double alpha);
         bool row_sweep_test_idx(std::vector<Tree *> &input, std::vector<index_t> &A, std::vector<index_t> &B, double delta, double query_alpha);
-        weight_t search_2f2a(std::vector<Tree *> &input, std::vector<Node *> &A, std::vector<Node *> &B, index_t* minimizer, size_t &split_match_count, size_t &split_mismatch_count); 
+        weight_t search_2f2a(std::vector<Tree *> &input, std::vector<Node *> &A, std::vector<Node *> &B, index_t* minimizer, size_t &split_match_count, size_t &split_mismatch_count, index_t branch_id = 0, QCFWriter *qcf_writer = nullptr);
         #endif  // ENABLE_TOB
 };
 
