@@ -53,6 +53,8 @@ a dependency-free bridge-based fallback and structural diagnostics.
 |---|---|
 | `delta` | Oracle-noise bound used by row sweep to set `theta=(1+delta)/4`; the proof assumes `delta < 1/3`. |
 | `--query-alpha` | Per-quartet T1 rejection level used by the empirical query surrogate. |
+
+The default `query-alpha` is `0.0005`.
 | `--eps` | Desired error bound used only in the report's theoretical sample-size calculation. |
 
 `delta` and `query-alpha` are not interchangeable. Lower `query-alpha` yields
@@ -76,6 +78,22 @@ Arguments are
 The report includes FP/FN rates,
 each misclassified split, blob adjacency, and the theorem's requirement on the
 larger-side size `s`.
+
+To compile, run the classifier metrics, construct the row-sweep ToB, and
+compare its splits with the trusted ToB in one command:
+
+```bash
+./compile_and_test_rowsweep.sh n15/00 0.15 0.0005
+```
+
+For a paired comparison, pass the row-sweep refinement to 3f1a so both methods
+start from exactly the same candidate edges:
+
+```bash
+REF=results/compile_test/n15_00_d0.15_a0.0005/refinement.nwk
+./compile_and_test_rowsweep.sh n15/00 0.15 0.0005 iqtree_500.nwk "$REF"
+./compile_and_test_3f1a.sh n15/00 1e-7 0.95 iqtree_500.nwk "$REF"
+```
 
 ## Many datasets × many deltas
 
@@ -105,6 +123,9 @@ silently overwrite one another.
 | `analyze_split.py` | single dataset+delta analysis with weakness report. |
 | `run_experiment.py` | multi-dataset × multi-delta sweep. |
 | `run_split_test.sh` | shell entry point (the one to use day-to-day). |
+| `compile_and_test_rowsweep.sh` | compile, classify candidate splits, construct a ToB, and report metrics. |
+| `compile_and_test_3f1a.sh` | compile, construct a 3f1a ToB, and report comparable split metrics. |
+| `compare_inferred_tob.py` | compare inferred and trusted ToB split sets. |
 
 ## Prerequisites
 
@@ -124,8 +145,8 @@ with `CC=clang -std=gnu17` and reinstall the packages.
 
 ## Scope of the C++ changes
 
-The topology-specific `pvalue_t1` helper, row-sweep-only qCF/T1 caches, and
-`--query-alpha` option are called only through:
-`query_pairs_together -> row_sweep_test_idx -> run_split_experiment`.
+The topology-specific `pvalue_t1` helper and row-sweep-only qCF/T1 caches are
+called through `query_pairs_together -> row_sweep_test_idx`, from either the
+split experiment or the row-sweep `SpeciesTree` constructor.
 Existing T3 p-values used by 3f1a, 2f2a, and the other tree-of-blobs searches
 remain unchanged.

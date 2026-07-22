@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from tree_of_blobs import splits_from_tob_tree, tree_of_blobs_splits
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_QUERY_ALPHA = 0.0005
 
 
 @dataclass(frozen=True)
@@ -30,12 +31,42 @@ class SplitTestScore:
         return len(self.false_positive_ids)
 
     @property
+    def true_positive_count(self):
+        return self.positive_count - self.false_negative_count
+
+    @property
+    def true_negative_count(self):
+        return self.negative_count - self.false_positive_count
+
+    @property
     def false_negative_rate(self):
         return _safe_rate(self.false_negative_count, self.positive_count)
 
     @property
     def false_positive_rate(self):
         return _safe_rate(self.false_positive_count, self.negative_count)
+
+    @property
+    def precision(self):
+        return _safe_rate(
+            self.true_positive_count,
+            self.true_positive_count + self.false_positive_count,
+        )
+
+    @property
+    def recall(self):
+        return _safe_rate(self.true_positive_count, self.positive_count)
+
+    @property
+    def specificity(self):
+        return _safe_rate(self.true_negative_count, self.negative_count)
+
+    @property
+    def f1(self):
+        return _safe_rate(
+            2 * self.precision * self.recall,
+            self.precision + self.recall,
+        )
 
     @property
     def accuracy(self):
@@ -123,7 +154,7 @@ def compute_tob_splits(net_path, tob_out_path):
 
 
 def run_rowsweep(binary, gene_trees, bip_file, out_file, delta, log_file,
-                 query_alpha=0.05):
+                 query_alpha=DEFAULT_QUERY_ALPHA):
     """Run one row-sweep command and return its process exit code."""
     cmd = [binary, "-i", gene_trees, "--rowsweep", bip_file,
            "--rowsweep_out", out_file, "--delta", str(delta),

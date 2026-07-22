@@ -19,8 +19,9 @@ import csv
 import os
 from dataclasses import dataclass
 
-from common import (camus_root, compute_tob_splits, default_binary, log_tail,
-                    read_labels, read_predictions, run_rowsweep, score)
+from common import (DEFAULT_QUERY_ALPHA, camus_root, compute_tob_splits,
+                    default_binary, log_tail, read_labels, read_predictions,
+                    run_rowsweep, score)
 from gen_bipartitions import build_bipartition_file
 
 DEFAULT_DELTAS = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30]
@@ -54,7 +55,7 @@ def parse_args():
     parser.add_argument("--datasets", type=int, default=10)
     parser.add_argument("--gene-trees", default="iqtree_500.nwk")
     parser.add_argument("--deltas", default=",".join(str(d) for d in DEFAULT_DELTAS))
-    parser.add_argument("--query-alpha", type=float, default=0.05,
+    parser.add_argument("--query-alpha", type=float, default=DEFAULT_QUERY_ALPHA,
                         help="per-query significance level for the T1 test")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--neg-mult", type=int, default=3)

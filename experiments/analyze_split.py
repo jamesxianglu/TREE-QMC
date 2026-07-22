@@ -13,8 +13,9 @@ import math
 import os
 from dataclasses import dataclass
 
-from common import (camus_root, compute_tob_splits, default_binary, log_tail,
-                    read_labels, read_predictions, run_rowsweep, score)
+from common import (DEFAULT_QUERY_ALPHA, camus_root, compute_tob_splits,
+                    default_binary, log_tail, read_labels, read_predictions,
+                    run_rowsweep, score)
 from gen_bipartitions import build_bipartition_file
 from tree_of_blobs import leaf_blob_adjacency, split_blob_adjacency
 
@@ -42,7 +43,7 @@ def parse_args():
     parser.add_argument("--outdir", default=None)
     parser.add_argument("--eps", type=float, default=0.05,
                         help="epsilon for the theoretical row-sweep bound")
-    parser.add_argument("--query-alpha", type=float, default=0.05,
+    parser.add_argument("--query-alpha", type=float, default=DEFAULT_QUERY_ALPHA,
                         help="per-query significance level for the T1 test")
     args = parser.parse_args()
 
@@ -210,10 +211,16 @@ def build_report(args, all_leaves, true_splits, source, bipartition_stats,
         f"  guarantee needs  s-1 >= {required_s_minus_one:.0f}   ({bound_status})",
         "",
         "-- results --",
+        f"  TRUE POSITIVES  : {result.true_positive_count:>2}/{result.positive_count:<2}",
         f"  FALSE NEGATIVES : {result.false_negative_count:>2}/{result.positive_count:<2}  "
         f"({result.false_negative_rate:6.1%})   (true split wrongly REJECTED)",
+        f"  TRUE NEGATIVES  : {result.true_negative_count:>2}/{result.negative_count:<2}",
         f"  FALSE POSITIVES : {result.false_positive_count:>2}/{result.negative_count:<2}  "
         f"({result.false_positive_rate:6.1%})   (non-split wrongly ACCEPTED)",
+        f"  precision       : {result.precision:6.1%}",
+        f"  recall          : {result.recall:6.1%}",
+        f"  specificity     : {result.specificity:6.1%}",
+        f"  F1              : {result.f1:6.1%}",
         f"  accuracy        : {result.accuracy:6.1%}"
         + (f"   [{result.missing_count} predictions missing]" if result.missing_count else ""),
         "",
