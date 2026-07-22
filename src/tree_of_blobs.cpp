@@ -1935,12 +1935,12 @@ bool SpeciesTree::query_pairs_together(std::vector<Tree *> &input, index_t x,
 // of Node* pointers, so it can be driven from a plain-text bipartition file
 // without needing a base tree.
 bool SpeciesTree::row_sweep_test_idx(std::vector<Tree *> &input,
-                                     std::vector<index_t> &A,
-                                     std::vector<index_t> &B,
+                                     const std::vector<index_t> &A,
+                                     const std::vector<index_t> &B,
                                      double delta,
                                      double query_alpha) {
-    std::vector<index_t> &S = (A.size() >= B.size()) ? A : B;  // larger side
-    std::vector<index_t> &R = (A.size() >= B.size()) ? B : A;  // smaller side
+    const std::vector<index_t> &S = (A.size() >= B.size()) ? A : B;  // larger side
+    const std::vector<index_t> &R = (A.size() >= B.size()) ? B : A;  // smaller side
     const size_t s = S.size();
     if (s < 2 || R.size() < 2) return true;   // not testable -> ACCEPT (trivial split)
 
@@ -1975,6 +1975,78 @@ bool SpeciesTree::row_sweep_test_idx(std::vector<Tree *> &input,
         }
     }
     return true;                              // ACCEPT
+}
+
+// Annotate every edge in a binary refinement with the row-sweep decision and
+// return a copy with rejected edges contracted. ACCEPT is stored as qtt_p=1
+// and REJECT as qtt_p=0 on the supplied refinement. Row sweep has no quartet
+// star test, so qst_p is fixed at zero.
+SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
+                         SpeciesTree* display, weight_t row_sweep_delta,
+                         weight_t query_alpha) {
+    std::cout << "Constructing tree of blobs using row-sweep search" << std::endl;
+
+    add_r_libpaths_and_load(RINS);
+    for (Tree *t : input) t->LCA_preprocessing();
+
+    this->dict = display->dict;
+    display->refine();
+
+    std::vector<Node *> internal;
+    std::vector<std::pair<std::vector<Node *>, std::vector<Node *>>> bips;
+    display->get_bipartitions(&internal, &bips);
+    std::cout << bips.size() << " branches to test" << std::endl;
+
+    std::unordered_set<Node *> false_positive;
+    for (std::size_t i = 0; i < internal.size(); ++i) {
+        Node *edge = internal[i];
+        edge->blob_id = i;
+        std::cout << "Testing branch id " << i << ", ";
+
+        std::vector<index_t> A;
+        std::vector<index_t> B;
+        A.reserve(bips[i].first.size());
+        B.reserve(bips[i].second.size());
+        for (Node *leaf : bips[i].first) A.push_back(leaf->index);
+        for (Node *leaf : bips[i].second) B.push_back(leaf->index);
+
+        bool accept = false;
+        if (edge->isfake) {
+            std::cout << "fake ***" << std::endl;
+        } else {
+            accept = row_sweep_test_idx(
+                input, A, B, row_sweep_delta, query_alpha
+            );
+            std::cout << "row-sweep: " << (accept ? "ACCEPT" : "REJECT")
+                      << "; qtt_p: " << (accept ? 1 : 0) << std::endl;
+        }
+        if (!accept) false_positive.insert(edge);
+        edge->min_pvalue = accept ? 1.0 : 0.0;
+        edge->max_pvalue = 0.0;
+        edge->min_f[0] = edge->min_f[1] = edge->min_f[2] = 0.0;
+        edge->split_match_count = 0;
+        edge->split_mismatch_count = 0;
+
+        // Keep the generic p-value Newick representation well-formed. These
+        // four taxa identify the tested edge but are not a row-sweep minimizer.
+        std::vector<index_t> witness;
+        witness.reserve(A.size() + B.size());
+        if (A.size() >= 2 && B.size() >= 2) {
+            witness = {A[0], A[1], B[0], B[1]};
+        } else {
+            witness.insert(witness.end(), A.begin(), A.end());
+            witness.insert(witness.end(), B.begin(), B.end());
+        }
+        if (witness.empty()) witness.push_back(0);
+        for (std::size_t j = 0; j < 4; ++j)
+            edge->minimizer[j] = witness[std::min(j, witness.size() - 1)];
+
+    }
+
+    if (display->root->children.size() == 2)
+        false_positive.insert(display->root->children[1]);
+
+    root = build_refinement(display->root, false_positive);
 }
 
 // Parse a comma-separated list of taxon names into indices, using the dict-derived
@@ -2039,7 +2111,7 @@ void SpeciesTree::run_split_experiment(std::vector<Tree *> &input,
 
 // 2f2a search algorithm O(n^3)
 SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
-                         SpeciesTree* display, QCFWriter *qcf_writer) {
+                         SpeciesTree* display, QCFWriter *qcf_writer) {//display means refinement of tree of blobs
     std::cout << "Constructing tree of blobs using 2-fix-2-alter search" << std::endl;
 
     add_r_libpaths_and_load(RINS);

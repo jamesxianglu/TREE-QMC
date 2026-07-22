@@ -140,6 +140,13 @@ Tree of Blobs Options:
         Write qCF counts for quartets evaluated by the blob search to CSV
 [(--3f1a)]
         Use 3-fix-1-alter algorithm for minimum p-value search
+[(--rowsweep-blob)]
+        Use row sweep to test and contract edges in the binary refinement
+        (--delta and --query-alpha configure the row-sweep test)
+[(--delta) <float number>]
+        Row-sweep oracle-noise bound used in theta=(1+delta)/4 (default: 0)
+[(--query-alpha <float number>)]
+        Per-query level for the row-sweep T1 tree test (default: 0.0005)
 [(--iter_limit_blob) <non-negative integer>]
         Maximum number of iterations for default (bipartition) search algorithm for
         min p-value (default: two times the number of taxa squared)

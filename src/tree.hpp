@@ -193,6 +193,7 @@ class SpeciesTree : public Tree {
         SpeciesTree(std::string stree_file, Dict *dict);
         #if ENABLE_TOB
         SpeciesTree(Tree *input, Dict *dict, weight_t alpha, weight_t beta, bool enable_split_test);
+        SpeciesTree(std::vector<Tree *> &input, Dict *dict, SpeciesTree* display, weight_t row_sweep_delta, weight_t query_alpha);
         SpeciesTree(std::vector<Tree *> &input, Dict *dict, SpeciesTree* display, QCFWriter *qcf_writer = nullptr);
         SpeciesTree(std::vector<Tree *> &input, Dict *dict, SpeciesTree* display, unsigned long int iter_limit_blob, QCFWriter *qcf_writer = nullptr);
         SpeciesTree(std::vector<Tree *> &input, Dict *dict, SpeciesTree* display, unsigned long int iter_limit_blob, bool three_fix_one_alter, bool two_fix_two_alter, bool is_quard, const std::string &output_qcfs_table_file = "");
@@ -305,7 +306,7 @@ class SpeciesTree : public Tree {
                                              index_t taxon);
         bool is_match_with_split(const std::array<weight_t,3>& qcf, index_t node_a1_id, index_t node_a2_id, index_t *indices);
         bool query_pairs_together(std::vector<Tree *> &input, index_t x, index_t y, index_t rho, index_t r, double alpha);
-        bool row_sweep_test_idx(std::vector<Tree *> &input, std::vector<index_t> &A, std::vector<index_t> &B, double delta, double query_alpha);
+        bool row_sweep_test_idx(std::vector<Tree *> &input, const std::vector<index_t> &A, const std::vector<index_t> &B, double delta, double query_alpha);
         weight_t search_2f2a(std::vector<Tree *> &input, std::vector<Node *> &A, std::vector<Node *> &B, index_t* minimizer, size_t &split_match_count, size_t &split_mismatch_count, index_t branch_id = 0, QCFWriter *qcf_writer = nullptr);
         #endif  // ENABLE_TOB
 };

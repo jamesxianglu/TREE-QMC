@@ -15,7 +15,7 @@ Instance::Instance(int argc, char **argv) {
     rowsweep_file = "";
     rowsweep_out_file = "";
     rowsweep_delta = 0.0;
-    rowsweep_query_alpha = 0.05;
+    rowsweep_query_alpha = 0.0005;
     root_str = "";
     annotation_tree_file = "";
     //pvalue_file = "";
@@ -39,6 +39,7 @@ Instance::Instance(int argc, char **argv) {
     enable_split_test = false;
     three_fix_one_alter = false;
     two_fix_two_alter = false;
+    row_sweep_blob = false;
     quard = false;
     network = false;
 
@@ -239,16 +240,30 @@ long long Instance::solve() {
 
     if (!load_pvalue && (store_pvalue || blob)) {
         #if ENABLE_TOB
-            if (!three_fix_one_alter && !two_fix_two_alter) {
-                if (iter_limit_blob == std::numeric_limits<unsigned long int>::max()) {
-                    iter_limit_blob = 2 * dict->size() * dict->size();
-                    std::cout << "Setting blob iteration limit to 2*ntaxa^2 = " << iter_limit_blob << std::endl;
+            if (row_sweep_blob) {
+                SpeciesTree* row_sweep_tree = new SpeciesTree(
+                    input, dict, output, rowsweep_delta, rowsweep_query_alpha
+                );
+                std::cout << "Printing output tree with pvalues:" << std::endl;
+                std::cout << output->to_string_pvalue() << std::endl;
+                if (!store_pvalue && blob) {
+                    delete output;
+                    output = row_sweep_tree;
+                } else {
+                    delete row_sweep_tree;
                 }
+            } else {
+                if (!three_fix_one_alter && !two_fix_two_alter) {
+                    if (iter_limit_blob == std::numeric_limits<unsigned long int>::max()) {
+                        iter_limit_blob = 2 * dict->size() * dict->size();
+                        std::cout << "Setting blob iteration limit to 2*ntaxa^2 = " << iter_limit_blob << std::endl;
+                    }
+                }
+                SpeciesTree* display = new SpeciesTree(input, dict, output, iter_limit_blob, three_fix_one_alter, two_fix_two_alter, quard, output_qcfs_table_file);
+                delete display;
+                std::cout << "Printing output tree with pvalues:" << std::endl;
+                std::cout << output->to_string_pvalue() << std::endl;
             }
-            SpeciesTree* display = new SpeciesTree(input, dict, output, iter_limit_blob, three_fix_one_alter, two_fix_two_alter, quard, output_qcfs_table_file);
-            delete display;
-            std::cout << "Printing output tree with pvalues:" << std::endl;
-            std::cout << output->to_string_pvalue() << std::endl;
         #else
             std::cout << "TREE-QMC was not compiled with tree of blob options!" << std::endl;
             exit(1);
@@ -256,7 +271,7 @@ long long Instance::solve() {
     }
 
     #if ENABLE_TOB
-    if (!load_pvalue && !store_pvalue && blob) {
+    if (!load_pvalue && !store_pvalue && blob && !row_sweep_blob) {
         SpeciesTree* tmp = new SpeciesTree(output, dict, alpha, beta, enable_split_test);
         delete output;
         output = tmp;
@@ -450,6 +465,9 @@ int Instance::parse(int argc, char **argv) {
         }
         else if (opt == "--2f2a") {
             two_fix_two_alter = true;
+        }
+        else if (opt == "--rowsweep-blob") {
+            row_sweep_blob = true;
         }
         else if (opt == "--quard") {
             quard = true;
@@ -756,7 +774,13 @@ int Instance::parse(int argc, char **argv) {
 
     if (input_file == "") {
         std::cout << "\nERROR: No input file specified" << std::endl;
-        return 2;   
+        return 2;
+    }
+
+    if (row_sweep_blob && (three_fix_one_alter || two_fix_two_alter || quard)) {
+        std::cout << "\nERROR: --rowsweep-blob cannot be combined with "
+                  << "--3f1a, --2f2a, or --quard" << std::endl;
+        return 2;
     }
 
     // Report settings and check that they make sense
@@ -769,7 +793,7 @@ int Instance::parse(int argc, char **argv) {
     if (table_file != "") std::cout << "table file: " << table_file << std::endl;
     if (output_qcfs_table_file != "")
         std::cout << "qCF table file: " << output_qcfs_table_file << std::endl;
-    if (rowsweep_file != "") {
+    if (rowsweep_file != "" || row_sweep_blob) {
         std::cout << "row-sweep query alpha: " << rowsweep_query_alpha << std::endl;
     }
 
