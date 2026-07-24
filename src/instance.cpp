@@ -14,8 +14,8 @@ Instance::Instance(int argc, char **argv) {
     output_qcfs_table_file = "";
     rowsweep_file = "";
     rowsweep_out_file = "";
-    rowsweep_delta = 0.0;
-    rowsweep_query_alpha = 0.0005;
+    rowsweep_delta = 0.25;
+    rowsweep_query_alpha = 0.001;
     root_str = "";
     annotation_tree_file = "";
     //pvalue_file = "";

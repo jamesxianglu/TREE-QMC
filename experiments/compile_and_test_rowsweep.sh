@@ -46,7 +46,6 @@ if [[ -n "$PROVIDED_REFINEMENT" && ! -f "$PROVIDED_REFINEMENT" ]]; then
 fi
 
 export PATH="$HOME/.juliaup/bin:/opt/homebrew/bin:$PATH"
-export PYTHONPYCACHEPREFIX="${PYTHONPYCACHEPREFIX:-/tmp/tree-qmc-pycache}"
 if command -v R >/dev/null 2>&1; then
     export R_HOME="$(R RHOME)"
 fi
@@ -79,9 +78,9 @@ echo "Constructing row-sweep ToB: $INFERRED_TOB"
     --override -o "$INFERRED_TOB" \
     > "$OUTDIR/constructor.log" 2>&1
 
-python3 "$HERE/compare_inferred_tob.py" \
+julia --startup-file=no "$HERE/compare_inferred_tob.jl" \
     "$TRUE_NETWORK" "$INFERRED_TOB" \
-    --truth-output "$OUTDIR/true_tob.nwk"
+    "$OUTDIR/true_tob.nwk"
 
 echo
 echo "-- inferred tree --"

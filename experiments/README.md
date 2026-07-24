@@ -80,7 +80,7 @@ each misclassified split, blob adjacency, and the theorem's requirement on the
 larger-side size `s`.
 
 To compile, run the classifier metrics, construct the row-sweep ToB, and
-compare its splits with the trusted ToB in one command:
+compare it with the trusted ToB in one command:
 
 ```bash
 ./compile_and_test_rowsweep.sh n15/00 0.15 0.0005
@@ -94,6 +94,24 @@ REF=results/compile_test/n15_00_d0.15_a0.0005/refinement.nwk
 ./compile_and_test_rowsweep.sh n15/00 0.15 0.0005 iqtree_500.nwk "$REF"
 ./compile_and_test_3f1a.sh n15/00 1e-7 0.95 iqtree_500.nwk "$REF"
 ```
+
+The tree comparison reports false negatives, false positives, and normalized
+unrooted Robinson–Foulds distance. The normalization denominator is the maximum
+RF distance for unrooted trees on `n` taxa, `2(n-3)`.
+
+To tune row-sweep on a seed-controlled random sample of 5 n15 and 3 n25
+datasets, run:
+
+```bash
+./sweep_rowsweep_hyperparameters.sh
+```
+
+The default grid has 7 delta values from 0.01 through 0.30 and 10 log-spaced
+query-alpha values from 0.000001 through 0.05. The script builds once and uses
+one refinement per dataset. Its only persistent output is `comparisons.tsv`,
+with dataset, delta, query-alpha, FN, FP, and normalized RF columns. All trees
+and logs are temporary. Set `SEED`, `DELTAS`, `QUERY_ALPHAS`, or `GENE_TREES`
+to override the defaults.
 
 ## Many datasets × many deltas
 
@@ -125,7 +143,8 @@ silently overwrite one another.
 | `run_split_test.sh` | shell entry point (the one to use day-to-day). |
 | `compile_and_test_rowsweep.sh` | compile, classify candidate splits, construct a ToB, and report metrics. |
 | `compile_and_test_3f1a.sh` | compile, construct a 3f1a ToB, and report comparable split metrics. |
-| `compare_inferred_tob.py` | compare inferred and trusted ToB split sets. |
+| `compare_inferred_tob.jl` | use PhyloNetworks to report FN, FP, and normalized unrooted Robinson–Foulds distance. |
+| `sweep_rowsweep_hyperparameters.sh` | tune delta and query-alpha on sampled n15/n25 datasets. |
 
 ## Prerequisites
 
