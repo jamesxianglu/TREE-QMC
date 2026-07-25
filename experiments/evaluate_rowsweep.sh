@@ -6,6 +6,10 @@
 # Usage:
 #   ./evaluate_rowsweep.sh n15 [n25 ...]
 #   ./evaluate_rowsweep.sh n15,n25
+#   ./evaluate_rowsweep.sh n15 10-19
+#
+# Numeric dataset IDs and inclusive ranges apply to the preceding leaf-count
+# group. For example, "n15 10-19" evaluates n15/10 through n15/19.
 #
 # The fixed, tuned parameters are delta=0.25 and query-alpha=0.001. For each
 # dataset, g_500.nwk is preferred; iqtree_500.nwk is used as a fallback.
@@ -40,24 +44,60 @@ cleanup() {
 trap cleanup EXIT
 
 MANIFEST="$WORKDIR/manifest.tsv"
-METADATA="$WORKDIR/metadata.tsv"
 COMPARISONS="$WORKDIR/comparisons.tsv"
 GROUPS="$WORKDIR/groups.txt"
-CSV_ROWS="$WORKDIR/rowsweep.csv.rows"
+FILTERS="$WORKDIR/filters.tsv"
+DATASET_DIRS="$WORKDIR/dataset_dirs.txt"
 
-# Accept either separate arguments (n15 n25), comma-separated arguments
-# (n15,n25), or shell prose-style arguments with trailing commas (n15, n25).
+# Accept leaf-count groups plus optional dataset IDs/ranges associated with the
+# most recently named group. Commas may be used as separators as well.
 : > "$GROUPS"
+: > "$FILTERS"
+current_group=""
 for argument in "$@"; do
     argument="${argument//,/ }"
-    for group in $argument; do
-        if [[ ! "$group" =~ ^n[0-9]+$ ]]; then
-            echo "ERROR: invalid leaf-count group '$group' (expected e.g. n15)" >&2
+    for token in $argument; do
+        if [[ "$token" =~ ^n[0-9]+$ ]]; then
+            current_group="$token"
+            if ! grep -qxF "$current_group" "$GROUPS"; then
+                printf '%s\n' "$current_group" >> "$GROUPS"
+            fi
+            continue
+        fi
+
+        if [[ ! "$token" =~ ^[0-9]+(-[0-9]+)?$ ]]; then
+            echo "ERROR: invalid argument '$token' (expected e.g. n15, 10, or 10-19)" >&2
             exit 1
         fi
-        if ! grep -qxF "$group" "$GROUPS"; then
-            printf '%s\n' "$group" >> "$GROUPS"
+        if [[ -z "$current_group" ]]; then
+            echo "ERROR: dataset selector '$token' must follow a leaf-count group" >&2
+            exit 1
         fi
+
+        range_start="${token%%-*}"
+        if [[ "$token" == *-* ]]; then
+            range_end="${token#*-}"
+        else
+            range_end="$range_start"
+        fi
+        start_number="$((10#$range_start))"
+        end_number="$((10#$range_end))"
+        if [[ "$start_number" -gt "$end_number" ]]; then
+            echo "ERROR: dataset range must be ascending: $token" >&2
+            exit 1
+        fi
+
+        width="${#range_start}"
+        if [[ "${#range_end}" -gt "$width" ]]; then
+            width="${#range_end}"
+        fi
+        for ((dataset_number = start_number; dataset_number <= end_number; dataset_number++)); do
+            printf -v selected_id "%0${width}d" "$dataset_number"
+            filter_line="${current_group}"$'\t'"${selected_id}"
+            if ! grep -qxF "$filter_line" "$FILTERS"; then
+                printf '%s\n' "$filter_line" >> "$FILTERS"
+            fi
+        done
     done
 done
 
@@ -105,11 +145,13 @@ if [[ ! -x "$BINARY" ]]; then
     exit 1
 fi
 
-printf 'dataset\tdelta\tquery_alpha\ttrue_network\tinferred_tree\ttrue_tob_output\n' \
-    > "$MANIFEST"
-printf 'dataset\ttrue_tob\tinferred_tob\tgene_trees\telapsed_seconds\n' > "$METADATA"
+mkdir -p "$RESULTS_DIR"
+if [[ ! -s "$RESULTS_CSV" ]]; then
+    printf '%s\n' "$CSV_HEADER" > "$RESULTS_CSV"
+fi
 
 dataset_count=0
+appended=0
 while IFS= read -r group; do
     dataset_group="$DATA_ROOT/$group"
     refinement_group="$REFINEMENT_ROOT/$group"
@@ -120,6 +162,23 @@ while IFS= read -r group; do
     if [[ ! -d "$refinement_group" ]]; then
         echo "ERROR: refinement group does not exist: $refinement_group" >&2
         exit 1
+    fi
+
+    : > "$DATASET_DIRS"
+    if grep -qF "${group}"$'\t' "$FILTERS"; then
+        while IFS=$'\t' read -r filter_group filter_id; do
+            if [[ "$filter_group" == "$group" ]]; then
+                refinement_dataset_dir="$refinement_group/$filter_id"
+                if [[ ! -d "$refinement_dataset_dir" ]]; then
+                    echo "ERROR: requested refinement dataset does not exist: $group/$filter_id" >&2
+                    exit 1
+                fi
+                printf '%s\n' "$refinement_dataset_dir" >> "$DATASET_DIRS"
+            fi
+        done < "$FILTERS"
+    else
+        find "$refinement_group" -mindepth 1 -maxdepth 1 -type d | sort \
+            > "$DATASET_DIRS"
     fi
 
     found_in_group=0
@@ -170,65 +229,55 @@ while IFS= read -r group; do
         elapsed_seconds="$(awk -v start="$start_time" -v end="$end_time" \
             'BEGIN { printf "%.6f", end - start }')"
 
+        # Analyze and persist this dataset before starting the next one. Using a
+        # one-row manifest retains the comparator's machine-readable interface.
+        printf 'dataset\tdelta\tquery_alpha\ttrue_network\tinferred_tree\ttrue_tob_output\n' \
+            > "$MANIFEST"
         printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
             "$dataset" "$DELTA" "$QUERY_ALPHA" "$true_network" \
             "$inferred_tob" "$true_tob" >> "$MANIFEST"
-        printf '%s\t%s\t%s\t%s\t%s\n' \
-            "$dataset" "$true_tob" "$inferred_tob" \
-            "$(basename "$gene_tree_path")" "$elapsed_seconds" >> "$METADATA"
-    done < <(find "$refinement_group" -mindepth 1 -maxdepth 1 -type d | sort)
+
+        echo "  Computing FN, FP, and normalized RF..."
+        julia --startup-file=no "$HERE/compare_inferred_tob.jl" \
+            --batch "$MANIFEST" "$COMPARISONS"
+
+        exec 3< "$COMPARISONS"
+        if ! IFS= read -r comparison_header <&3 || \
+            ! IFS=$'\t' read -r comparison_dataset _ _ fn fp rf <&3; then
+            echo "ERROR: missing comparison row for $dataset" >&2
+            exit 1
+        fi
+        if [[ "$comparison_header" != $'dataset\tdelta\tquery_alpha\tfn\tfp\tnormalized_rf' ]]; then
+            echo "ERROR: comparison output has an unexpected header" >&2
+            exit 1
+        fi
+        if IFS= read -r extra_comparison <&3; then
+            echo "ERROR: expected one comparison row for $dataset" >&2
+            exit 1
+        fi
+        exec 3<&-
+        if [[ "$comparison_dataset" != "$dataset" ]]; then
+            echo "ERROR: comparison dataset mismatch: $comparison_dataset != $dataset" >&2
+            exit 1
+        fi
+
+        taxa="${dataset%%/*}"
+        printf '%s,%s,"%s","%s",%s,%s,%s,%s,%s,%s,%s\n' \
+            "$taxa" "$network_id" "$true_tob" "$inferred_tob" "$METHOD" \
+            "$DELTA" "$QUERY_ALPHA" "$fn" "$fp" "$rf" "$elapsed_seconds" \
+            >> "$RESULTS_CSV"
+        appended="$((appended + 1))"
+        echo "  Appended result to $RESULTS_CSV"
+    done < "$DATASET_DIRS"
 
     if [[ "$found_in_group" -eq 0 ]]; then
         echo "ERROR: no refinement datasets found under $refinement_group" >&2
         exit 1
     fi
 done < "$GROUPS"
-
-echo "Computing FN, FP, and normalized RF..."
-julia --startup-file=no "$HERE/compare_inferred_tob.jl" \
-    --batch "$MANIFEST" "$COMPARISONS"
-
-# The comparison and metadata files are generated in identical manifest order.
-# Verify their dataset keys while joining so a partial/misaligned CSV cannot be
-# appended silently. Paths are quoted to retain a benchmark-style CSV layout.
-: > "$CSV_ROWS"
-exec 3< "$COMPARISONS"
-exec 4< "$METADATA"
-IFS=$'\t' read -r _ _ _ _ _ _ <&3
-IFS=$'\t' read -r _ _ _ _ _ <&4
-appended=0
-while IFS=$'\t' read -r comparison_dataset _ _ fn fp rf <&3; do
-    if ! IFS=$'\t' read -r metadata_dataset true_tob inferred_tob _ elapsed <&4; then
-        echo "ERROR: metadata ended before comparisons" >&2
-        exit 1
-    fi
-    if [[ "$comparison_dataset" != "$metadata_dataset" ]]; then
-        echo "ERROR: comparison/metadata mismatch: $comparison_dataset != $metadata_dataset" >&2
-        exit 1
-    fi
-
-    taxa="${comparison_dataset%%/*}"
-    network_id="${comparison_dataset#*/}"
-    printf '%s,%s,"%s","%s",%s,%s,%s,%s,%s,%s,%s\n' \
-        "$taxa" "$network_id" "$true_tob" "$inferred_tob" "$METHOD" \
-        "$DELTA" "$QUERY_ALPHA" "$fn" "$fp" "$rf" "$elapsed" \
-        >> "$CSV_ROWS"
-    appended="$((appended + 1))"
-done
-
-if IFS= read -r extra_metadata <&4; then
-    echo "ERROR: metadata contains more rows than comparisons" >&2
-    exit 1
-fi
 if [[ "$appended" -ne "$dataset_count" ]]; then
-    echo "ERROR: expected $dataset_count comparison rows, got $appended" >&2
+    echo "ERROR: expected to append $dataset_count rows, got $appended" >&2
     exit 1
 fi
-
-mkdir -p "$RESULTS_DIR"
-if [[ ! -s "$RESULTS_CSV" ]]; then
-    printf '%s\n' "$CSV_HEADER" > "$RESULTS_CSV"
-fi
-cat "$CSV_ROWS" >> "$RESULTS_CSV"
 
 echo "Appended $appended rows to $RESULTS_CSV"
