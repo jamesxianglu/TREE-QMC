@@ -60,7 +60,31 @@ function compare_tobs(true_tob, inferred_tree_path)
     maximum_rf > 0 || fail("normalized RF requires at least four taxa")
     normalized_rf = rf / maximum_rf
 
-    return (; taxon_count, fn, fp, normalized_rf)
+    # Rates, each normalized by its own tree's internal branch count rather than
+    # by the shared 2(n-3) denominator of the normalized RF:
+    #   fnr = true internal branches missed      / true internal branches
+    #   fpr = estimated internal branches spurious / estimated internal branches
+    # A fully contracted estimate has no internal branches and hence no
+    # opportunity to be wrong in the FP direction, so its fpr is reported as 0
+    # (fp is necessarily 0 there too); the same convention covers a star true
+    # tree of blobs. mean_rate is the unweighted average of the two, which is
+    # the usual way to keep over- and under-contraction from being traded off
+    # against each other by tree size.
+    fnr = true_split_count > 0 ? fn / true_split_count : 0.0
+    fpr = inferred_split_count > 0 ? fp / inferred_split_count : 0.0
+    mean_rate = (fnr + fpr) / 2
+
+    return (;
+        taxon_count,
+        fn,
+        fp,
+        normalized_rf,
+        true_internal = true_split_count,
+        estimated_internal = inferred_split_count,
+        fnr,
+        fpr,
+        mean_rate,
+    )
 end
 
 
@@ -68,16 +92,29 @@ function print_comparison(result)
     println("\n-- constructed tree split comparison --")
     println("  false negatives      : ", result.fn)
     println("  false positives      : ", result.fp)
+    println("  true internal edges  : ", result.true_internal)
+    println("  est. internal edges  : ", result.estimated_internal)
     @printf("  normalized RF        : %.10f\n", result.normalized_rf)
+    @printf("  false negative rate  : %.10f\n", result.fnr)
+    @printf("  false positive rate  : %.10f\n", result.fpr)
+    @printf("  mean of the two      : %.10f\n", result.mean_rate)
 end
 
 
-function run_batch(manifest_path, output_tsv)
+function run_batch(manifest_path, output_tsv; rates::Bool=false)
     true_tob_cache = Dict{String, Any}()
     mkpath(dirname(abspath(output_tsv)))
 
     open(output_tsv, "w") do output
-        println(output, "dataset\tdelta\tquery_alpha\tfn\tfp\tnormalized_rf")
+        # Without --rates the columns are exactly what the row-sweep harness has
+        # always parsed; the extra columns are opt-in so those callers keep
+        # working unchanged.
+        if rates
+            println(output, "dataset\tdelta\tquery_alpha\tfn\tfp\tnormalized_rf" *
+                "\ttrue_internal\testimated_internal\tfnr\tfpr\tmean_rate")
+        else
+            println(output, "dataset\tdelta\tquery_alpha\tfn\tfp\tnormalized_rf")
+        end
         for (line_number, line) in enumerate(eachline(manifest_path))
             line_number == 1 && continue
             isempty(strip(line)) && continue
@@ -92,16 +129,34 @@ function run_batch(manifest_path, output_tsv)
                 prepare_true_tob(true_network_path, true_tob_output)
             end
             result = compare_tobs(true_tob, inferred_tree_path)
-            @printf(
-                output,
-                "%s\t%s\t%s\t%d\t%d\t%.10f\n",
-                dataset,
-                delta,
-                query_alpha,
-                result.fn,
-                result.fp,
-                result.normalized_rf,
-            )
+            if rates
+                @printf(
+                    output,
+                    "%s\t%s\t%s\t%d\t%d\t%.10f\t%d\t%d\t%.10f\t%.10f\t%.10f\n",
+                    dataset,
+                    delta,
+                    query_alpha,
+                    result.fn,
+                    result.fp,
+                    result.normalized_rf,
+                    result.true_internal,
+                    result.estimated_internal,
+                    result.fnr,
+                    result.fpr,
+                    result.mean_rate,
+                )
+            else
+                @printf(
+                    output,
+                    "%s\t%s\t%s\t%d\t%d\t%.10f\n",
+                    dataset,
+                    delta,
+                    query_alpha,
+                    result.fn,
+                    result.fp,
+                    result.normalized_rf,
+                )
+            end
         end
     end
 end
@@ -117,10 +172,14 @@ function main()
         run_batch(ARGS[2], ARGS[3])
         return
     end
+    if length(ARGS) == 4 && ARGS[1] == "--batch" && ARGS[2] == "--rates"
+        run_batch(ARGS[3], ARGS[4]; rates=true)
+        return
+    end
     fail(
         "usage:\n" *
         "  julia compare_inferred_tob.jl <true-network> <inferred-tree> <true-tob-output>\n" *
-        "  julia compare_inferred_tob.jl --batch <manifest.tsv> <results.tsv>"
+        "  julia compare_inferred_tob.jl --batch [--rates] <manifest.tsv> <results.tsv>"
     )
 end
 

@@ -1,23 +1,37 @@
 #!/usr/bin/env bash
 #
-# Evaluate row-sweep on every dataset with a precomputed refinement in one or
-# more leaf-count groups, then append the results to results/rowsweep.csv.
+# Evaluate corner-row contraction on every dataset with a precomputed refinement
+# in one or more leaf-count groups, then append the results to
+# results/cornerrow.csv.
 #
 # Usage:
-#   ./evaluate_rowsweep.sh n15 [n25 ...]
-#   ./evaluate_rowsweep.sh n15,n25
-#   ./evaluate_rowsweep.sh n15 10-19
+#   ./evaluate_corner_row.sh n15 [n25 ...]
+#   ./evaluate_corner_row.sh n15,n25
+#   ./evaluate_corner_row.sh n15 10-19
 #
 # Numeric dataset IDs and inclusive ranges apply to the preceding leaf-count
 # group. For example, "n15 10-19" evaluates n15/10 through n15/19.
 #
-# The fixed, tuned parameters are delta=0.25 and query-alpha=0.001. For each
-# dataset, iqtree_500.nwk is preferred; 
+# The default parameters are k=0 (meaning the largest legal row sample size,
+# n-3), heavy=1, tau=0.3125 (which is (1+delta)/4 at the tuned delta=0.25),
+# query-alpha=0.001, and seed=20250729. Each may be overridden through the
+# environment, e.g. CORNER_HEAVY=2 CORNER_TAU=0.25 ./evaluate_corner_row.sh n15.
+# CORNER_HEAVY=m makes every row draw min(m*k, row population) tuples.
+#
+# For each dataset, iqtree_500.nwk is preferred; g_500.nwk is a fallback.
+#
+# Each row records FN and FP counts, the normalized RF, and the two rates
+#   fnr = fn / (internal branches of the true tree of blobs)
+#   fpr = fp / (internal branches of the estimated tree of blobs)
+# together with their unweighted mean and both denominators.
+#
+# To run this on a SLURM cluster instead, one job per dataset, use
+# submit_cornerrow.sh followed by collect_cornerrow.sh.
 
 set -euo pipefail
 
 if [[ $# -eq 0 ]]; then
-    sed -n '3,10p' "$0"
+    sed -n '3,29p' "$0"
     exit 1
 fi
 
@@ -29,15 +43,31 @@ REFINEMENT_ROOT="$PROJECT_ROOT/data/refinements"
 BUILD_DIR="$SOURCE_DIR/build"
 BINARY="$BUILD_DIR/tree-qmc"
 RESULTS_DIR="$PROJECT_ROOT/results"
-RESULTS_CSV="$RESULTS_DIR/rowsweep.csv"
-TREE_OUTPUT_ROOT="$RESULTS_DIR/rowsweep_trees"
+RESULTS_CSV="$RESULTS_DIR/cornerrow.csv"
+TREE_OUTPUT_ROOT="$RESULTS_DIR/cornerrow_trees"
 
-DELTA="0.25"
-QUERY_ALPHA="0.001"
-METHOD="ROWSWEEP"
-CSV_HEADER="taxa,network_id,true_tob,estimated_tob,method,delta,query_alpha,fn,fp,rf,wall_clock_seconds"
+K="${CORNER_K:-0}"
+HEAVY="${CORNER_HEAVY:-1}"
+TAU="${CORNER_TAU:-0.3125}"
+QUERY_ALPHA="${CORNER_QUERY_ALPHA:-0.001}"
+SEED="${CORNER_SEED:-20250729}"
+METHOD="CORNERROW"
+CSV_HEADER="taxa,network_id,true_tob,estimated_tob,method,k,heavy,tau,query_alpha,seed,fn,fp,rf,true_internal,estimated_internal,fnr,fpr,mean_rate,wall_clock_seconds"
 
-WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/rowsweep-evaluation.XXXXXX")"
+if [[ ! "$K" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: CORNER_K must be a non-negative integer: $K" >&2
+    exit 1
+fi
+if [[ ! "$HEAVY" =~ ^[0-9]+$ ]] || [[ "$HEAVY" -lt 1 ]]; then
+    echo "ERROR: CORNER_HEAVY must be a positive integer: $HEAVY" >&2
+    exit 1
+fi
+if [[ ! "$SEED" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: CORNER_SEED must be a non-negative integer: $SEED" >&2
+    exit 1
+fi
+
+WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/cornerrow-evaluation.XXXXXX")"
 cleanup() {
     rm -rf -- "$WORKDIR"
 }
@@ -124,6 +154,8 @@ if [[ -s "$RESULTS_CSV" ]]; then
         echo "ERROR: $RESULTS_CSV has an unexpected header" >&2
         echo "  expected: $CSV_HEADER" >&2
         echo "  found:    $existing_header" >&2
+        echo "Rows written before the FNR/FPR columns were added have the shorter" >&2
+        echo "header; move that file aside and re-run to regenerate it." >&2
         exit 1
     fi
 fi
@@ -149,6 +181,8 @@ mkdir -p "$RESULTS_DIR"
 if [[ ! -s "$RESULTS_CSV" ]]; then
     printf '%s\n' "$CSV_HEADER" > "$RESULTS_CSV"
 fi
+
+echo "Parameters: k=$K heavy=$HEAVY tau=$TAU query-alpha=$QUERY_ALPHA seed=$SEED"
 
 dataset_count=0
 appended=0
@@ -208,9 +242,9 @@ while IFS= read -r group; do
         fi
 
         output_dir="$TREE_OUTPUT_ROOT/$group/$network_id"
-        inferred_tob="$output_dir/rowsweep.nwk"
+        inferred_tob="$output_dir/cornerrow.nwk"
         true_tob="$output_dir/true_tob.nwk"
-        constructor_log="$output_dir/rowsweep.log"
+        constructor_log="$output_dir/cornerrow.log"
         mkdir -p "$output_dir"
 
         dataset_count="$((dataset_count + 1))"
@@ -218,8 +252,10 @@ while IFS= read -r group; do
         start_time="$(python3 -c 'import time; print(time.monotonic())')"
         if ! "$BINARY" -i "$gene_tree_path" \
             --blobsearchonly "$refinement" \
-            --blob --rowsweep-blob \
-            --delta "$DELTA" --query-alpha "$QUERY_ALPHA" \
+            --blob --cornerrow-blob \
+            --corner-k "$K" --heavy-sampling "$HEAVY" \
+            --corner-tau "$TAU" --corner-seed "$SEED" \
+            --query-alpha "$QUERY_ALPHA" \
             --override -o "$inferred_tob" \
             > "$constructor_log" 2>&1; then
             cat "$constructor_log" >&2
@@ -230,24 +266,26 @@ while IFS= read -r group; do
             'BEGIN { printf "%.6f", end - start }')"
 
         # Analyze and persist this dataset before starting the next one. Using a
-        # one-row manifest retains the comparator's machine-readable interface.
+        # one-row manifest retains the comparator's machine-readable interface;
+        # its two label columns carry tau and query alpha here.
         printf 'dataset\tdelta\tquery_alpha\ttrue_network\tinferred_tree\ttrue_tob_output\n' \
             > "$MANIFEST"
         printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-            "$dataset" "$DELTA" "$QUERY_ALPHA" "$true_network" \
+            "$dataset" "$TAU" "$QUERY_ALPHA" "$true_network" \
             "$inferred_tob" "$true_tob" >> "$MANIFEST"
 
-        echo "  Computing FN, FP, and normalized RF..."
+        echo "  Computing FN, FP, normalized RF, FNR, and FPR..."
         julia --startup-file=no "$HERE/compare_inferred_tob.jl" \
-            --batch "$MANIFEST" "$COMPARISONS"
+            --batch --rates "$MANIFEST" "$COMPARISONS"
 
         exec 3< "$COMPARISONS"
         if ! IFS= read -r comparison_header <&3 || \
-            ! IFS=$'\t' read -r comparison_dataset _ _ fn fp rf <&3; then
+            ! IFS=$'\t' read -r comparison_dataset _ _ fn fp rf true_internal \
+                estimated_internal fnr fpr mean_rate <&3; then
             echo "ERROR: missing comparison row for $dataset" >&2
             exit 1
         fi
-        if [[ "$comparison_header" != $'dataset\tdelta\tquery_alpha\tfn\tfp\tnormalized_rf' ]]; then
+        if [[ "$comparison_header" != $'dataset\tdelta\tquery_alpha\tfn\tfp\tnormalized_rf\ttrue_internal\testimated_internal\tfnr\tfpr\tmean_rate' ]]; then
             echo "ERROR: comparison output has an unexpected header" >&2
             exit 1
         fi
@@ -262,9 +300,11 @@ while IFS= read -r group; do
         fi
 
         taxa="${dataset%%/*}"
-        printf '%s,%s,"%s","%s",%s,%s,%s,%s,%s,%s,%s\n' \
+        printf '%s,%s,"%s","%s",%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
             "$taxa" "$network_id" "$true_tob" "$inferred_tob" "$METHOD" \
-            "$DELTA" "$QUERY_ALPHA" "$fn" "$fp" "$rf" "$elapsed_seconds" \
+            "$K" "$HEAVY" "$TAU" "$QUERY_ALPHA" "$SEED" "$fn" "$fp" "$rf" \
+            "$true_internal" "$estimated_internal" "$fnr" "$fpr" "$mean_rate" \
+            "$elapsed_seconds" \
             >> "$RESULTS_CSV"
         appended="$((appended + 1))"
         echo "  Appended result to $RESULTS_CSV"

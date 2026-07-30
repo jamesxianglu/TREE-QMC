@@ -34,11 +34,13 @@ class Instance {
         std::string output_qcfs_table_file;
         std::string rowsweep_file, rowsweep_out_file;
         weight_t rowsweep_delta, rowsweep_query_alpha;
+        unsigned long int corner_row_k, corner_row_heavy, corner_row_seed;
+        weight_t corner_row_tau;
         std::string annotation_tree_file;
         std::string normal_mode, weight_mode, execute_mode, taxa_mode, score_mode, data_mode, brln_mode;
         unsigned long int refine_seed, cut_seed, iter_limit, iter_limit_blob;
         weight_t support_low, support_high, support_default, support_threshold, blob_threshold, alpha, beta;
-        bool contract, char2tree, rootonly, pcsonly, blob, store_pvalue, load_pvalue, enable_split_test, override_file, three_fix_one_alter, two_fix_two_alter, row_sweep_blob, quard, network;
+        bool contract, char2tree, rootonly, pcsonly, blob, store_pvalue, load_pvalue, enable_split_test, override_file, three_fix_one_alter, two_fix_two_alter, row_sweep_blob, corner_row_blob, quard, network;
         int parse(int argc, char **argv);
         void prepare_root_taxa();
         void prepare_indiv2taxon_map();

@@ -4,6 +4,8 @@
 #include "rlib_dirs.hpp"
 #include <random>
 #include <algorithm>
+#include <array>
+#include <cstdint>
 #include <memory>
 
 void get_qCFs(std::vector<Tree *> &input, index_t *indices, weight_t *qCFs) {
@@ -2047,6 +2049,330 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
         false_positive.insert(display->root->children[1]);
 
     root = build_refinement(display->root, false_positive);
+}
+
+// Corner sets of the internal edge e = (edge, parent(edge)) of the binary
+// refinement T'. On success corners[0], corners[1] are A_1(e), A_2(e) -- the two
+// components at the lower endpoint -- and corners[2], corners[3] are B_1(e),
+// B_2(e), the two components at the upper endpoint. The rooted encoding stores a
+// degree-2 root; when the upper endpoint is that root, the true other endpoint of
+// e is the root of the sibling subtree, so the upper corners come from the
+// sibling's two children. Returns false when e is not an internal edge of the
+// unrooted tree underlying T' (one of the four corners would be empty), i.e. when
+// e induces a trivial split of X.
+bool SpeciesTree::corner_sets_for_edge(Tree *refinement, Node *edge,
+                                       std::vector<index_t> corners[4]) {
+    for (int i = 0; i < 4; ++i) corners[i].clear();
+    if (edge == NULL || edge->parent == NULL || edge->children.size() != 2)
+        return false;
+
+    Node *corner_root[4] = {edge->children[0], edge->children[1], NULL, NULL};
+    bool complement_last = false;
+
+    Node *upper = edge->parent;
+    if (upper->parent == NULL && upper->children.size() == 2) {
+        Node *sibling = (upper->children[0] == edge) ? upper->children[1]
+                                                     : upper->children[0];
+        if (sibling->children.size() != 2) return false;  // pendant, trivial split
+        corner_root[2] = sibling->children[0];
+        corner_root[3] = sibling->children[1];
+    } else if (upper->parent == NULL) {
+        if (upper->children.size() != 3) return false;    // not binary
+        int slot = 2;
+        for (Node *child : upper->children)
+            if (child != edge) corner_root[slot++] = child;
+    } else {
+        if (upper->children.size() != 2) return false;    // not binary
+        corner_root[2] = (upper->children[0] == edge) ? upper->children[1]
+                                                      : upper->children[0];
+        complement_last = true;   // B_2 is everything above the upper endpoint
+    }
+
+    std::unordered_set<index_t> covered;
+    const int explicit_corners = complement_last ? 3 : 4;
+    for (int i = 0; i < explicit_corners; ++i) {
+        std::unordered_set<Node *> leaf_set;
+        refinement->get_leaf_set(corner_root[i], &leaf_set);
+        for (Node *leaf : leaf_set) {
+            corners[i].push_back(leaf->index);
+            covered.insert(leaf->index);
+        }
+        if (corners[i].empty()) return false;
+    }
+    if (complement_last) {
+        std::vector<Node *> leaves;
+        refinement->get_leaves(refinement->root, &leaves);
+        for (Node *leaf : leaves)
+            if (covered.find(leaf->index) == covered.end())
+                corners[3].push_back(leaf->index);
+        if (corners[3].empty()) return false;
+    }
+
+    // get_leaf_set returns an unordered set; sorting makes the row populations
+    // -- and hence the Phase 1 samples drawn from the seed -- reproducible.
+    for (int i = 0; i < 4; ++i) std::sort(corners[i].begin(), corners[i].end());
+    return true;
+}
+
+// Draw a uniformly random k-element subset of {0,...,N-1} without materializing
+// the population, by running k steps of a Fisher-Yates shuffle over a sparse
+// representation of the identity permutation. Positions below the current step
+// are never read again, so only the entries actually touched are stored.
+static void corner_row_sample_indices(std::uint64_t population,
+                                      std::size_t k,
+                                      std::mt19937_64 &rng,
+                                      std::vector<std::uint64_t> &out) {
+    out.clear();
+    if (population == 0) return;
+    if ((std::uint64_t) k > population) k = (std::size_t) population;
+    out.reserve(k);
+
+    std::unordered_map<std::uint64_t, std::uint64_t> permuted;
+    const auto value_at = [&permuted](std::uint64_t position) {
+        auto it = permuted.find(position);
+        return it == permuted.end() ? position : it->second;
+    };
+    for (std::size_t step = 0; step < k; ++step) {
+        std::uniform_int_distribution<std::uint64_t> pick(step, population - 1);
+        const std::uint64_t position = pick(rng);
+        const std::uint64_t drawn = value_at(position);
+        permuted[position] = value_at(step);
+        out.push_back(drawn);
+    }
+}
+
+// CornerRowContraction (Algorithm "refinement-edge-sweep"): edge-by-edge
+// reconstruction of the tree of blobs T from a binary refinement T'. Every
+// internal edge of T' is tested with rows built only from that edge's four corner
+// sets, and every flagged edge is contracted.
+//
+// Phase 1 pre-samples every row of every edge from a private seed before a single
+// oracle query is issued, as the theorem's query-independence assumption requires;
+// Phase 2 then classifies each edge, terminating as soon as one row flags it.
+//
+// The oracle O is replaced by the same T1 tree-test surrogate the row sweep uses:
+// query_pairs_together(x, y, c_1, c_2) is false exactly when T1 rejects
+// xy | c_1 c_2 at query_alpha, which is what the algorithm counts as a
+// contradiction. Query results are cached inside that surrogate, so a 4-set shared
+// by several rows or edges is only evaluated once.
+SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
+                         SpeciesTree *display,
+                         const CornerRowParams &corner_row) {
+    std::cout << "Constructing tree of blobs using corner-row contraction"
+              << std::endl;
+
+    add_r_libpaths_and_load(RINS);
+    for (Tree *t : input) t->LCA_preprocessing();
+
+    this->dict = display->dict;
+    display->refine();
+
+    std::vector<Node *> internal;
+    std::vector<std::pair<std::vector<Node *>, std::vector<Node *>>> bips;
+    display->get_bipartitions(&internal, &bips);
+    std::cout << internal.size() << " branches to test" << std::endl;
+
+    std::vector<Node *> all_leaves;
+    display->get_leaves(display->root, &all_leaves);
+    std::vector<index_t> taxa;
+    taxa.reserve(all_leaves.size());
+    for (Node *leaf : all_leaves) taxa.push_back(leaf->index);
+    std::sort(taxa.begin(), taxa.end());   // fix the order of the rows x in X
+    const std::size_t n = taxa.size();
+
+    // Lemma "row-population size" guarantees |Omega_x(e)| >= n - 3, so every row
+    // admits a k-element subset exactly when 1 <= k <= n - 3.
+    const std::size_t k_max = (n >= 4) ? (n - 3) : 0;
+    std::size_t k = (std::size_t) corner_row.k;
+    if (k == 0) k = k_max;
+    if (k > k_max) {
+        std::cout << "WARNING: row sample size k=" << k << " exceeds n-3="
+                  << k_max << "; using k=" << k_max << std::endl;
+        k = k_max;
+    }
+    // Heavy sampling spends the slack in rows whose population exceeds k: row x
+    // draws min(heavy * k, |Omega_x(e)|) tuples instead of k. Note that
+    // max_{j <= heavy} min(j*k, |Omega_x(e)|) collapses to min(heavy*k,
+    // |Omega_x(e)|), since min(j*k, N) is nondecreasing in j. Both tails of
+    // Theorem "refinement-edge-guarantee" are e^{-(row size) * D(tau||.)}, and
+    // its lemmas hold for any sample size at most the row population, so a
+    // larger row can only sharpen the guarantee.
+    const unsigned long int heavy = (corner_row.heavy == 0) ? 1 : corner_row.heavy;
+    const double tau = (double) corner_row.tau;
+    if (!(tau > 0.0 && tau < 1.0)) {
+        std::cout << "\nERROR: corner-row tau must lie strictly between 0 and 1: "
+                  << tau << std::endl;
+        exit(1);
+    }
+    std::cout << "corner-row parameters: k=" << k << ", heavy=" << heavy
+              << ", tau=" << tau
+              << ", query alpha=" << corner_row.query_alpha
+              << ", seed=" << corner_row.seed << std::endl;
+
+    // Corner sets of every internal edge, computed up front.
+    std::vector<std::array<std::vector<index_t>, 4>> edge_corners(internal.size());
+    std::vector<bool> testable(internal.size(), false);
+    for (std::size_t i = 0; i < internal.size(); ++i) {
+        internal[i]->blob_id = i;
+        if (internal[i]->isfake) continue;   // arbitrary resolution of a polytomy
+        std::vector<index_t> corners[4];
+        if (!corner_sets_for_edge(display, internal[i], corners)) continue;
+        for (int c = 0; c < 4; ++c) edge_corners[i][c].swap(corners[c]);
+        testable[i] = true;
+    }
+
+    // Phase 1: pre-sample every row of every edge, before any oracle query. A row
+    // of edge e indexed by x in A draws from Omega_x^A(e) = (A \ {x}) x B_1 x B_2
+    // and by x in B from Omega_x^B(e) = (B \ {x}) x A_1 x A_2.
+    struct CornerRowSample {
+        index_t x;
+        std::vector<std::array<index_t, 3>> tuples;
+    };
+    std::vector<std::vector<CornerRowSample>> rows(internal.size());
+
+    std::mt19937_64 rng(corner_row.seed);
+    std::vector<std::uint64_t> drawn;
+    std::size_t sampled_rows = 0;
+    std::size_t sampled_tuples = 0;
+    std::size_t exhaustive_rows = 0;
+    for (std::size_t i = 0; i < internal.size(); ++i) {
+        if (!testable[i]) continue;
+        const std::vector<index_t> &A1 = edge_corners[i][0];
+        const std::vector<index_t> &A2 = edge_corners[i][1];
+        const std::vector<index_t> &B1 = edge_corners[i][2];
+        const std::vector<index_t> &B2 = edge_corners[i][3];
+
+        std::vector<index_t> A(A1);
+        A.insert(A.end(), A2.begin(), A2.end());
+        std::vector<index_t> B(B1);
+        B.insert(B.end(), B2.begin(), B2.end());
+        std::sort(A.begin(), A.end());
+        std::sort(B.begin(), B.end());
+        const std::unordered_set<index_t> A_set(A.begin(), A.end());
+
+        rows[i].reserve(n);
+        for (index_t x : taxa) {
+            const bool x_in_A = A_set.find(x) != A_set.end();
+            const std::vector<index_t> &same = x_in_A ? A : B;
+            const std::vector<index_t> &first = x_in_A ? B1 : A1;
+            const std::vector<index_t> &second = x_in_A ? B2 : A2;
+
+            std::vector<index_t> partners;
+            partners.reserve(same.size() - 1);
+            for (index_t y : same)
+                if (y != x) partners.push_back(y);
+
+            const std::uint64_t population = (std::uint64_t) partners.size() *
+                first.size() * second.size();
+            const std::uint64_t row_size =
+                std::min<std::uint64_t>((std::uint64_t) heavy * k, population);
+            if (row_size == population) exhaustive_rows++;
+            corner_row_sample_indices(population, (std::size_t) row_size, rng,
+                                      drawn);
+
+            CornerRowSample row;
+            row.x = x;
+            row.tuples.reserve(drawn.size());
+            for (std::uint64_t code : drawn) {
+                const std::uint64_t yi = code % partners.size();
+                code /= partners.size();
+                const std::uint64_t ci = code % first.size();
+                code /= first.size();
+                row.tuples.push_back({partners[yi], first[ci], second[code]});
+            }
+            sampled_tuples += row.tuples.size();
+            rows[i].push_back(row);
+            sampled_rows++;
+        }
+    }
+    std::cout << "Phase 1: sampled " << sampled_rows << " rows ("
+              << sampled_tuples << " tuples, " << exhaustive_rows
+              << " exhaustive) over " << internal.size() << " branches"
+              << std::endl;
+
+    // Phase 2: classify each edge, with early termination.
+    std::unordered_set<Node *> contracted;
+    for (std::size_t i = 0; i < internal.size(); ++i) {
+        Node *edge = internal[i];
+        std::cout << "Testing branch id " << i << ", ";
+
+        index_t witness[4] = {0, 0, 0, 0};
+        bool have_witness = false;
+        bool flagged = false;
+
+        if (edge->isfake) {
+            // Introduced by refine() to break a polytomy of the input, so it is
+            // not an edge of T'; contract it rather than query it.
+            flagged = true;
+            std::cout << "fake ***" << std::endl;
+        } else if (!testable[i]) {
+            // A trivial split is a split of every tree on X, so it is retained.
+            std::cout << "corner-row: ACCEPT (trivial split, not tested)"
+                      << std::endl;
+        } else {
+            for (const CornerRowSample &row : rows[i]) {
+                // Rows may differ in size under heavy sampling, so the flagging
+                // rule c > tau * k is applied to each row's own sample size.
+                const double threshold = tau * (double) row.tuples.size();
+                std::size_t contradictions = 0;
+                for (const std::array<index_t, 3> &tuple : row.tuples) {
+                    if (!query_pairs_together(input, row.x, tuple[0], tuple[1],
+                                              tuple[2], corner_row.query_alpha)) {
+                        contradictions++;
+                        if ((double) contradictions > threshold) {
+                            // The count only grows, so the remaining queries of
+                            // this row cannot change its verdict.
+                            witness[0] = row.x;
+                            witness[1] = tuple[0];
+                            witness[2] = tuple[1];
+                            witness[3] = tuple[2];
+                            have_witness = true;
+                            break;
+                        }
+                    }
+                }
+                if (have_witness) { flagged = true; break; }
+            }
+            std::cout << "corner-row: " << (flagged ? "REJECT" : "ACCEPT")
+                      << "; qtt_p: " << (flagged ? 0 : 1) << std::endl;
+        }
+
+        if (flagged) contracted.insert(edge);
+        edge->min_pvalue = flagged ? 0.0 : 1.0;
+        edge->max_pvalue = 0.0;
+        edge->min_f[0] = edge->min_f[1] = edge->min_f[2] = 0.0;
+        edge->split_match_count = 0;
+        edge->split_mismatch_count = 0;
+
+        // Keep the generic p-value Newick representation well-formed. For a
+        // contracted edge these are the four taxa of the query that pushed a row
+        // past the threshold; otherwise they merely identify the edge.
+        if (!have_witness) {
+            const std::vector<Node *> &A = bips[i].first;
+            const std::vector<Node *> &B = bips[i].second;
+            std::vector<index_t> fallback;
+            fallback.reserve(A.size() + B.size());
+            if (A.size() >= 2 && B.size() >= 2) {
+                fallback = {A[0]->index, A[1]->index, B[0]->index, B[1]->index};
+            } else {
+                for (Node *leaf : A) fallback.push_back(leaf->index);
+                for (Node *leaf : B) fallback.push_back(leaf->index);
+            }
+            if (fallback.empty()) fallback.push_back(0);
+            for (std::size_t j = 0; j < 4; ++j)
+                witness[j] = fallback[std::min(j, fallback.size() - 1)];
+        }
+        for (std::size_t j = 0; j < 4; ++j) edge->minimizer[j] = witness[j];
+    }
+
+    std::cout << "Contracting " << contracted.size() << " of "
+              << internal.size() << " branches" << std::endl;
+
+    // Suppress the degree-2 root of the rooted encoding, as the row sweep does.
+    if (display->root->children.size() == 2)
+        contracted.insert(display->root->children[1]);
+
+    root = build_refinement(display->root, contracted);
 }
 
 // Parse a comma-separated list of taxon names into indices, using the dict-derived

@@ -16,6 +16,10 @@ Instance::Instance(int argc, char **argv) {
     rowsweep_out_file = "";
     rowsweep_delta = 0.25;
     rowsweep_query_alpha = 0.001;
+    corner_row_k = 0;        // 0 selects the largest legal row sample size, n-3
+    corner_row_heavy = 1;    // each row draws min(heavy*k, row population)
+    corner_row_tau = -1.0;   // negative selects the default (1+delta)/4
+    corner_row_seed = 20250729;
     root_str = "";
     annotation_tree_file = "";
     //pvalue_file = "";
@@ -40,6 +44,7 @@ Instance::Instance(int argc, char **argv) {
     three_fix_one_alter = false;
     two_fix_two_alter = false;
     row_sweep_blob = false;
+    corner_row_blob = false;
     quard = false;
     network = false;
 
@@ -252,6 +257,25 @@ long long Instance::solve() {
                 } else {
                     delete row_sweep_tree;
                 }
+            } else if (corner_row_blob) {
+                CornerRowParams corner_row;
+                corner_row.k = corner_row_k;
+                corner_row.heavy = corner_row_heavy;
+                corner_row.tau = (corner_row_tau < 0.0)
+                    ? (1.0 + rowsweep_delta) / 4.0 : corner_row_tau;
+                corner_row.query_alpha = rowsweep_query_alpha;
+                corner_row.seed = corner_row_seed;
+                SpeciesTree* corner_row_tree = new SpeciesTree(
+                    input, dict, output, corner_row
+                );
+                std::cout << "Printing output tree with pvalues:" << std::endl;
+                std::cout << output->to_string_pvalue() << std::endl;
+                if (!store_pvalue && blob) {
+                    delete output;
+                    output = corner_row_tree;
+                } else {
+                    delete corner_row_tree;
+                }
             } else {
                 if (!three_fix_one_alter && !two_fix_two_alter) {
                     if (iter_limit_blob == std::numeric_limits<unsigned long int>::max()) {
@@ -271,7 +295,7 @@ long long Instance::solve() {
     }
 
     #if ENABLE_TOB
-    if (!load_pvalue && !store_pvalue && blob && !row_sweep_blob) {
+    if (!load_pvalue && !store_pvalue && blob && !row_sweep_blob && !corner_row_blob) {
         SpeciesTree* tmp = new SpeciesTree(output, dict, alpha, beta, enable_split_test);
         delete output;
         output = tmp;
@@ -468,6 +492,9 @@ int Instance::parse(int argc, char **argv) {
         }
         else if (opt == "--rowsweep-blob") {
             row_sweep_blob = true;
+        }
+        else if (opt == "--cornerrow-blob") {
+            corner_row_blob = true;
         }
         else if (opt == "--quard") {
             quard = true;
@@ -754,6 +781,41 @@ int Instance::parse(int argc, char **argv) {
                 return 2;
             }
         }
+        else if (opt == "--corner-k") {
+            std::string param = "";
+            if (i < argc - 1) param = argv[++ i];
+            if (! s2ul(param, &corner_row_k)) {
+                std::cout << "\nERROR: invalid parameter: " << param << std::endl;
+                return 2;
+            }
+        }
+        else if (opt == "--heavy-sampling") {
+            std::string param = "";
+            if (i < argc - 1) param = argv[++ i];
+            if (! s2ul(param, &corner_row_heavy) || corner_row_heavy == 0) {
+                std::cout << "\nERROR: --heavy-sampling must be a positive integer: "
+                          << param << std::endl;
+                return 2;
+            }
+        }
+        else if (opt == "--corner-tau") {
+            std::string param = "";
+            if (i < argc - 1) param = argv[++ i];
+            if (!s2d(param, &corner_row_tau) || !std::isfinite(corner_row_tau) ||
+                    corner_row_tau <= 0.0 || corner_row_tau >= 1.0) {
+                std::cout << "\nERROR: --corner-tau must be strictly between 0 and 1: "
+                          << param << std::endl;
+                return 2;
+            }
+        }
+        else if (opt == "--corner-seed") {
+            std::string param = "";
+            if (i < argc - 1) param = argv[++ i];
+            if (! s2ul(param, &corner_row_seed)) {
+                std::cout << "\nERROR: invalid parameter: " << param << std::endl;
+                return 2;
+            }
+        }
         else if (opt == "--query-alpha") {
             std::string param = "";
             if (i < argc - 1) param = argv[++ i];
@@ -783,6 +845,18 @@ int Instance::parse(int argc, char **argv) {
         return 2;
     }
 
+    if (corner_row_blob && (three_fix_one_alter || two_fix_two_alter || quard)) {
+        std::cout << "\nERROR: --cornerrow-blob cannot be combined with "
+                  << "--3f1a, --2f2a, or --quard" << std::endl;
+        return 2;
+    }
+
+    if (corner_row_blob && row_sweep_blob) {
+        std::cout << "\nERROR: --cornerrow-blob cannot be combined with "
+                  << "--rowsweep-blob" << std::endl;
+        return 2;
+    }
+
     // Report settings and check that they make sense
     std::cout << std::endl << "SETTINGS:" << std::endl;
 
@@ -795,6 +869,22 @@ int Instance::parse(int argc, char **argv) {
         std::cout << "qCF table file: " << output_qcfs_table_file << std::endl;
     if (rowsweep_file != "" || row_sweep_blob) {
         std::cout << "row-sweep query alpha: " << rowsweep_query_alpha << std::endl;
+    }
+    if (corner_row_blob) {
+        std::cout << "corner-row query alpha: " << rowsweep_query_alpha << std::endl;
+        std::cout << "corner-row tau: ";
+        if (corner_row_tau < 0.0)
+            std::cout << (1.0 + rowsweep_delta) / 4.0 << " (from delta = "
+                      << rowsweep_delta << ")" << std::endl;
+        else
+            std::cout << corner_row_tau << std::endl;
+        std::cout << "corner-row k: ";
+        if (corner_row_k == 0) std::cout << "n-3" << std::endl;
+        else std::cout << corner_row_k << std::endl;
+        std::cout << "corner-row heavy sampling: " << corner_row_heavy
+                  << " (each row draws min(" << corner_row_heavy
+                  << "k, row population))" << std::endl;
+        std::cout << "corner-row seed: " << corner_row_seed << std::endl;
     }
 
     // Output file
