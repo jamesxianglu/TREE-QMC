@@ -29,8 +29,9 @@ if [ "$#" -lt 2 ]; then
     exit 1
 fi
 
-# Ensure the tree-qmc binary exists; build it into ../build if missing.
-SOURCE_DIR="$(dirname "$HERE")"
+# Ensure the tree-qmc binary exists; build it if missing. This lives in
+# experiments/split_test/, so the TREE-QMC source root is two levels up.
+SOURCE_DIR="$(dirname "$(dirname "$HERE")")"
 BINARY="$SOURCE_DIR/build/tree-qmc"
 if [ ! -x "$BINARY" ]; then
     echo "tree-qmc binary not found at $BINARY -- building..."

@@ -32,16 +32,23 @@ class Instance {
         std::string root_str, quartet_format;
         std::string input_file, output_file, mapping_file, stree_file, table_file; //, pvalue_file;
         std::string output_qcfs_table_file;
-        std::string rowsweep_file, rowsweep_out_file;
+        std::string rowsweep_file, rowsweep_out_file, rowsweep_dump_prefix;
+        bool rowsweep_dump_all_targets, rowsweep_dump_all_anchors;
         weight_t rowsweep_delta, rowsweep_query_alpha;
         unsigned long int corner_row_k, corner_row_heavy, corner_row_seed;
-        weight_t corner_row_tau;
+        std::string oracle_spec, rowsweep_tau_spec, rowsweep_heavy_spec;
+        unsigned long int rowsweep_anchors;
+        weight_t oracle_cf_max, oracle_margin;
+        std::string corner_row_tau_spec;
         std::string annotation_tree_file;
         std::string normal_mode, weight_mode, execute_mode, taxa_mode, score_mode, data_mode, brln_mode;
         unsigned long int refine_seed, cut_seed, iter_limit, iter_limit_blob;
         weight_t support_low, support_high, support_default, support_threshold, blob_threshold, alpha, beta;
         bool contract, char2tree, rootonly, pcsonly, blob, store_pvalue, load_pvalue, enable_split_test, override_file, three_fix_one_alter, two_fix_two_alter, row_sweep_blob, corner_row_blob, quard, network;
         int parse(int argc, char **argv);
+        #if ENABLE_TOB
+        RowSweepParams build_row_sweep_params(std::string *error) const;
+        #endif  // ENABLE_TOB
         void prepare_root_taxa();
         void prepare_indiv2taxon_map();
         void input_trees();

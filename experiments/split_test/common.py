@@ -91,7 +91,9 @@ def camus_root():
 
 
 def default_binary():
-    return os.path.join(os.path.dirname(HERE), "build", "tree-qmc")
+    # This file lives in experiments/split_test/, so the TREE-QMC source root
+    # holding build/ is two levels up.
+    return os.path.join(os.path.dirname(os.path.dirname(HERE)), "build", "tree-qmc")
 
 
 def r_home():
@@ -139,7 +141,9 @@ def compute_tob_splits(net_path, tob_out_path):
 
     Returns (all_leaves, splits, source_str).
     """
-    jl = os.path.join(HERE, "compute_tree_of_blob.jl")
+    # compute_tree_of_blob.jl is shared with the reconstruction pipeline and
+    # lives one level up, in experiments/.
+    jl = os.path.join(os.path.dirname(HERE), "compute_tree_of_blob.jl")
     cmd = [julia_bin(), "--startup-file=no", jl, net_path, tob_out_path]
     proc = subprocess.run(cmd, env=child_env(), capture_output=True, text=True)
     if proc.returncode == 0 and os.path.exists(tob_out_path) and os.path.getsize(tob_out_path):

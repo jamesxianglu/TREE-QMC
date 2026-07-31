@@ -1,171 +1,86 @@
-# Row-sweep split-test experiments
+# experiments
 
-This folder evaluates `SpeciesTree::row_sweep_test_idx`, which predicts whether
-a candidate bipartition `A|B` is a split in the **tree of blobs** (ToB). The
-experiments use the CAMUS simulated datasets under `data/camus-dataset`.
+Tree-of-blobs reconstruction experiments: run a method on a set of CAMUS
+replicates, compare each estimate against the true tree of blobs, and collect
+the results into one CSV per configuration.
 
-## What the implementation is testing
+Three scripts do all of it, and none of them is method-specific:
 
-For each four-taxon set `{x,y,rho,r}`, the theoretical oracle returns an exact
-labelled quarnet. The algorithm counts a contradiction whenever
-`Query(x,y,rho,r) != xy|rho r`. Therefore a 4-blob answer is counted, but a
-different quartet-tree topology is also counted.
-
-The C++ implementation has gene-tree counts rather than an exact oracle. It
-uses MSCquartets' T1 test as a statistical surrogate:
-
-* `true`: the specific quartet tree `xy|rho r` was not rejected;
-* `false`: T1 rejected it (or no resolved quartet was observed), so row sweep
-  counts one contradiction.
-
-A rejection is not a unique 4-blob diagnosis, and finite data can fail to
-reject a real 4-blob. The experiment measures how well this surrogate supports
-the full row-sweep decision.
-
-The experiment flow is:
-
-1. Compute trusted ToB splits from the true network with PhyloNetworks.
-2. Generate true splits plus hard and random non-splits.
-3. Run `tree-qmc --rowsweep` on every candidate.
-4. Compare ACCEPT/REJECT predictions with the trusted labels.
-
-## Ground truth
-
-The true non-trivial splits are computed from `true_net.nwk` by
-PhyloNetworks' `treeofblobs` through `compute_tree_of_blob.jl`. The resulting
-tree's internal edges define the reference splits. `tree_of_blobs.py` provides
-a dependency-free bridge-based fallback and structural diagnostics.
-
-* **Positives** — the true non-trivial ToB splits (should be ACCEPTed).
-* **Negatives** — a *mixed* set of non-splits (should be REJECTed): half
-  **hard** (a true split perturbed by moving one taxon) and half **random**.
-
-`--rowsweep_out` writes `1=ACCEPT` and `0=REJECT`:
-
-| ground truth | correct | error | name |
-|--------------|---------|-------|------|
-| positive (true split) | 1 | 0 | **false negative** |
-| negative (non-split)  | 0 | 1 | **false positive** |
-
-## Parameters
-
-| parameter | meaning |
+| script | role |
 |---|---|
-| `delta` | Oracle-noise bound used by row sweep to set `theta=(1+delta)/4`; the proof assumes `delta < 1/3`. |
-| `--query-alpha` | Per-quartet T1 rejection level used by the empirical query surrogate. |
+| `submit_tob.sh` | expand a dataset selection and launch one job per replicate, on SLURM or locally |
+| `run_tob.sbatch` | one replicate, one configuration -> estimate + one-row CSV shard |
+| `collect_tob.sh` | merge a run's shards into `results/<run label>.csv` |
 
-The default `query-alpha` is `0.0005`.
-| `--eps` | Desired error bound used only in the report's theoretical sample-size calculation. |
+Everything that distinguishes one experiment from another is passed in, so
+adding a method means adding one line to the `case` in `run_tob.sbatch`, not
+writing another pair of scripts.
 
-`delta` and `query-alpha` are not interchangeable. Lower `query-alpha` yields
-fewer T1 rejections: this protects true splits but reduces power against
-4-blobs and other contradictions. Calibrate it on held-out simulations. For a
-conservative family-wise level of 0.05 over `m` planned quartet tests, a simple
-starting point is `0.05/m`.
+## Running one
 
-## One dataset
+Nothing is defaulted: a result is only reproducible if its configuration was
+written down, so it has to be typed out.
 
-```bash
-./run_split_test.sh n25/10 0.15                 # one delta
-./run_split_test.sh n25/10 0.05,0.15,0.3        # sweep deltas
-./run_split_test.sh n15/00 0.15 g_true.nwk      # choose gene trees
-./run_split_test.sh n25/10 0.15 iqtree_500.nwk --neg-mult 4 --seed 7
-./run_split_test.sh n25/10 0.15 iqtree_500.nwk --query-alpha 0.001
+```sh
+./submit_tob.sh --method rowsweep --runner slurm --gene-trees g_500.nwk \
+    --datasets 'n15 n25 n50 n100 n150 n200' \
+    --args '--oracle t1+cf|maj --rowsweep-tau 0.45,0.60 --rowsweep-heavy 1,2 --query-alpha 0.001'
 ```
 
-Arguments are
-`<dataset-path> <delta[,delta2,...]> [gene_trees=iqtree_500.nwk] [extra flags]`.
-The report includes FP/FN rates,
-each misclassified split, blob adjacency, and the theorem's requirement on the
-larger-side size `s`.
+`--runner local` runs the same jobs serially instead of submitting them, which
+is how the small groups are usually done. `--datasets` takes groups, optionally
+narrowed: `'n15 n50:00-09 n100:07'`. Add `--dry-run` to see the plan first.
 
-To compile, run the classifier metrics, construct the row-sweep ToB, and
-compare it with the trusted ToB in one command:
+The run lands in `results/runs/<label>/`, where the label is a slug of the
+method and its flags, and the binary is copied in so that a later rebuild cannot
+change what the numbers mean. Then:
 
-```bash
-./compile_and_test_rowsweep.sh n15/00 0.15 0.0005
+```sh
+./collect_tob.sh --run-dir results/runs/rowsweep__oracle-t1+cf-maj-rowsweep-tau-0.45-0.60-...
 ```
 
-For a paired comparison, pass the row-sweep refinement to 3f1a so both methods
-start from exactly the same candidate edges:
+writes `results/<same label>.csv`. The name carries the method, the oracle and
+the parameters, so a listing of `results/` says which configurations have been
+measured.
 
-```bash
-REF=results/compile_test/n15_00_d0.15_a0.0005/refinement.nwk
-./compile_and_test_rowsweep.sh n15/00 0.15 0.0005 iqtree_500.nwk "$REF"
-./compile_and_test_3f1a.sh n15/00 1e-7 0.95 iqtree_500.nwk "$REF"
+Reproducing the originally published numbers is just another configuration:
+
+```sh
+./submit_tob.sh --method rowsweep --runner local --gene-trees iqtree_500.nwk \
+    --datasets 'n15' --args '--delta 0.25 --query-alpha 0.001'
+./submit_tob.sh --method cornerrow --runner local --gene-trees iqtree_500.nwk \
+    --datasets 'n15' \
+    --args '--corner-k 0 --heavy-sampling 2 --corner-tau 0.3125 --corner-seed 20250729 --query-alpha 0.001'
 ```
 
-The tree comparison reports false negatives, false positives, and normalized
-unrooted Robinson–Foulds distance. The normalization denominator is the maximum
-RF distance for unrooted trees on `n` taxa, `2(n-3)`.
+Both were checked against `results/rowsweep.csv` and `results/cornerrow.csv`
+and agree exactly.
 
-To tune row-sweep on a seed-controlled random sample of 5 n15 and 3 n25
-datasets, run:
+## What the methods are testing
 
-```bash
-./sweep_rowsweep_hyperparameters.sh
+For each four-taxon set `{x,y,rho,r}` the theoretical oracle returns an exact
+labelled quarnet, and a contradiction is `Query(x,y,rho,r) != xy|rho r`. So a
+4-blob answer counts, and so does a different quartet-tree topology.
+
+The implementation has gene-tree counts rather than an oracle, so it substitutes
+a test, chosen with `--oracle`; see `results/analysis/README.md` for the
+available approximations and `doc/oracle_and_row_rule.tex` for why the tuned
+configurations look the way they do. The tuned settings measured so far:
+
+```sh
+# row sweep
+--oracle 't1+cf|maj' --rowsweep-tau 0.45,0.60 --rowsweep-heavy 1,2
+# corner row (the cf guard is inert here, and t3 is worse than t1)
+--oracle 't1|maj' --corner-tau 0.3125,0.60
 ```
 
-The default grid has 7 delta values from 0.01 through 0.30 and 10 log-spaced
-query-alpha values from 0.000001 through 0.05. The script builds once and uses
-one refinement per dataset. Its only persistent output is `comparisons.tsv`,
-with dataset, delta, query-alpha, FN, FP, and normalized RF columns. All trees
-and logs are temporary. Set `SEED`, `DELTAS`, `QUERY_ALPHAS`, or `GENE_TREES`
-to override the defaults.
+## The rest
 
-## Many datasets × many deltas
+| path | what it is |
+|---|---|
+| `compute_tree_of_blob.jl` | ground truth: PhyloNetworks `treeofblobs` on `true_net.nwk`. Called by `run_tob.sbatch` and cached in `results/true_tob/`, since it depends only on the dataset |
+| `dump_rowsweep_evidence.sh` | records the qCF counts and T1 p-value of every 4-set the sweep queries, so decision rules can be scored offline without rerunning anything |
+| `split_test/` | a *different* experiment: does `row_sweep_test_idx` classify a given bipartition correctly, scored against labelled positives and negatives. Driven by `--rowsweep FILE`; entry point `split_test/run_split_test.sh` |
 
-```bash
-export PATH="$HOME/.juliaup/bin:/opt/homebrew/bin:$PATH"; export R_HOME="$(R RHOME)"
-python3 run_experiment.py --group n15 --datasets 10          # pooled FNR/FPR per delta
-python3 run_experiment.py --group n25 --datasets 10 --deltas 0.05,0.15,0.3
-```
-
-Outputs under `results/…` include:
-
-* `detail_a<alpha>.csv`: one row per dataset and delta;
-* `summary_by_delta_a<alpha>.csv`: pooled rates by delta;
-* `bips/`, `preds/`, `logs/`, and `tob/`: intermediate and diagnostic files.
-
-Alpha is part of output names so runs at different T1 thresholds do not
-silently overwrite one another.
-
-## Files
-
-| file | role |
-|------|------|
-| `compute_tree_of_blob.jl` | PhyloNetworks `treeofblobs` → ToB tree (trusted ground truth). |
-| `tree_of_blobs.py` | Newick parsing, bridge-based ToB splits (fallback), blob-adjacency diagnostics. |
-| `gen_bipartitions.py` | positives + mixed negatives → labelled TSV. |
-| `common.py` | path/environment resolution, Julia ToB call, TSV parsing, execution, and named score metrics. |
-| `analyze_split.py` | single dataset+delta analysis with weakness report. |
-| `run_experiment.py` | multi-dataset × multi-delta sweep. |
-| `run_split_test.sh` | shell entry point (the one to use day-to-day). |
-| `compile_and_test_rowsweep.sh` | compile, classify candidate splits, construct a ToB, and report metrics. |
-| `compile_and_test_3f1a.sh` | compile, construct a 3f1a ToB, and report comparable split metrics. |
-| `compare_inferred_tob.jl` | use PhyloNetworks to report FN, FP, and normalized unrooted Robinson–Foulds distance. |
-| `sweep_rowsweep_hyperparameters.sh` | tune delta and query-alpha on sampled n15/n25 datasets. |
-
-## Prerequisites
-
-* `tree-qmc` built at `../build/tree-qmc` (see build notes below).
-* R with `Rcpp`, `RInside`, `MSCquartets` (linked by the binary).
-* Julia with `PhyloNetworks` (`import Pkg; Pkg.add("PhyloNetworks")`).
-
-### Building tree-qmc on macOS / Apple clang
-
-```bash
-export PATH="/opt/homebrew/bin:$PATH"
-cmake -S TREE-QMC -B TREE-QMC/build -DCMAKE_BUILD_TYPE=Release && cmake --build TREE-QMC/build -j4
-```
-
-If R package compilation fails with `invalid value 'gnu23'`, add `~/.R/Makevars`
-with `CC=clang -std=gnu17` and reinstall the packages.
-
-## Scope of the C++ changes
-
-The topology-specific `pvalue_t1` helper and row-sweep-only qCF/T1 caches are
-called through `query_pairs_together -> row_sweep_test_idx`, from either the
-split experiment or the row-sweep `SpeciesTree` constructor.
-Existing T3 p-values used by 3f1a, 2f2a, and the other tree-of-blobs searches
-remain unchanged.
+`results/` here holds scratch output from `split_test/`; the benchmark CSVs live
+in the top-level `results/`.

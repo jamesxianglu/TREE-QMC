@@ -14,12 +14,23 @@ Instance::Instance(int argc, char **argv) {
     output_qcfs_table_file = "";
     rowsweep_file = "";
     rowsweep_out_file = "";
+    rowsweep_dump_prefix = "";
+    rowsweep_dump_all_targets = false;
+    rowsweep_dump_all_anchors = false;
     rowsweep_delta = 0.25;
     rowsweep_query_alpha = 0.001;
     corner_row_k = 0;        // 0 selects the largest legal row sample size, n-3
     corner_row_heavy = 1;    // each row draws min(heavy*k, row population)
-    corner_row_tau = -1.0;   // negative selects the default (1+delta)/4
+    corner_row_tau_spec = "";  // empty selects the default (1+delta)/4
     corner_row_seed = 20250729;
+    // Defaults reproduce the original row sweep exactly. An empty tau spec
+    // means "derive it from delta", as (1+delta)/4 always did.
+    oracle_spec = "t1";
+    rowsweep_tau_spec = "";
+    rowsweep_heavy_spec = "1";
+    rowsweep_anchors = 1;
+    oracle_cf_max = 0.80;      // only consulted by a "cf" term
+    oracle_margin = 0.0;       // only consulted by a "maj" term
     root_str = "";
     annotation_tree_file = "";
     //pvalue_file = "";
@@ -150,6 +161,68 @@ Instance::~Instance() {
 }
 
 
+
+#if ENABLE_TOB
+// Split a comma-separated list of numbers, tolerating a single value that is
+// then broadcast to every oracle track.
+static std::vector<std::string> split_csv(const std::string &text) {
+    std::vector<std::string> out;
+    std::size_t pos = 0;
+    while (pos <= text.size()) {
+        const std::size_t comma = text.find(',', pos);
+        out.push_back(text.substr(pos, comma == std::string::npos
+                                      ? std::string::npos : comma - pos));
+        if (comma == std::string::npos) break;
+        pos = comma + 1;
+    }
+    return out;
+}
+
+// Assemble the row sweep's configuration from the command line. With the
+// defaults this is the original algorithm: oracle "t1", tau = (1+delta)/4,
+// heavy = 1, anchors = 1.
+RowSweepParams Instance::build_row_sweep_params(std::string *error) const {
+    RowSweepParams params;
+    params.anchors = rowsweep_anchors;
+    params.oracle = OracleSpec::parse(oracle_spec, rowsweep_query_alpha,
+                                      oracle_cf_max, oracle_margin, error);
+    if (!error->empty()) return params;
+    const std::size_t n_tracks = params.oracle.tracks.size();
+
+    // An empty tau spec keeps the historical derivation from delta.
+    std::vector<std::string> taus = rowsweep_tau_spec.empty()
+        ? std::vector<std::string>(1, std::to_string((1.0 + rowsweep_delta) / 4.0))
+        : split_csv(rowsweep_tau_spec);
+    std::vector<std::string> heavies = split_csv(rowsweep_heavy_spec);
+
+    if (taus.size() != 1 && taus.size() != n_tracks) {
+        *error = "--rowsweep-tau needs one value or one per oracle track";
+        return params;
+    }
+    if (heavies.size() != 1 && heavies.size() != n_tracks) {
+        *error = "--rowsweep-heavy needs one value or one per oracle track";
+        return params;
+    }
+    for (std::size_t t = 0; t < n_tracks; ++t) {
+        weight_t tau;
+        unsigned long int heavy;
+        const std::string &tau_text = taus[taus.size() == 1 ? 0 : t];
+        const std::string &heavy_text = heavies[heavies.size() == 1 ? 0 : t];
+        if (!s2d(tau_text, &tau) || !(tau > 0.0 && tau < 1.0)) {
+            *error = "row-sweep tau must lie strictly in (0, 1): " + tau_text;
+            return params;
+        }
+        if (!s2ul(heavy_text, &heavy)) {
+            *error = "row-sweep heavy must be a non-negative integer: " + heavy_text;
+            return params;
+        }
+        params.tau.push_back(tau);
+        params.heavy.push_back(heavy);
+    }
+    return params;
+}
+#endif  // ENABLE_TOB
+
 long long Instance::solve() {
     srand(cut_seed);
 
@@ -233,8 +306,14 @@ long long Instance::solve() {
         std::unordered_map<std::string, index_t> name2index;
         for (index_t idx = 0; idx < dict->size(); idx++)
             name2index[dict->index2label(idx)] = idx;
-        output->run_split_experiment(input, name2index, rowsweep_file, rowsweep_out_file,
-                                     rowsweep_delta, rowsweep_query_alpha);
+        std::string rs_error;
+        RowSweepParams rs_params = build_row_sweep_params(&rs_error);
+        if (!rs_error.empty()) {
+            std::cout << "\nERROR: " << rs_error << std::endl;
+            exit(1);
+        }
+        output->run_split_experiment(input, name2index, rowsweep_file,
+                                     rowsweep_out_file, rs_params);
     }
     #else
     if (rowsweep_file != "") {
@@ -243,11 +322,43 @@ long long Instance::solve() {
     }
     #endif  // ENABLE_TOB
 
+    #if ENABLE_TOB
+    // Instrumentation only: record the evidence the row sweep would consume on
+    // this refinement and stop, without constructing a tree of blobs.
+    if (rowsweep_dump_prefix != "") {
+        if (output == NULL) {
+            std::cout << "ERROR: --rowsweep-dump requires a species tree "
+                      << "(use --blobsearchonly)." << std::endl;
+            exit(1);
+        }
+        std::cout << "Dumping row-sweep evidence to " << rowsweep_dump_prefix << std::endl;
+        std::string dump_error;
+        RowSweepParams dump_params = build_row_sweep_params(&dump_error);
+        if (!dump_error.empty()) {
+            std::cout << "\nERROR: " << dump_error << std::endl;
+            exit(1);
+        }
+        output->dump_row_sweep_evidence(input, rowsweep_dump_prefix,
+                                        dump_params.oracle,
+                                        rowsweep_dump_all_targets,
+                                        rowsweep_dump_all_anchors);
+        auto dump_end = std::chrono::high_resolution_clock::now();
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            dump_end - start).count();
+    }
+    #endif  // ENABLE_TOB
+
     if (!load_pvalue && (store_pvalue || blob)) {
         #if ENABLE_TOB
             if (row_sweep_blob) {
+                std::string error;
+                RowSweepParams row_sweep = build_row_sweep_params(&error);
+                if (!error.empty()) {
+                    std::cout << "\nERROR: " << error << std::endl;
+                    exit(1);
+                }
                 SpeciesTree* row_sweep_tree = new SpeciesTree(
-                    input, dict, output, rowsweep_delta, rowsweep_query_alpha
+                    input, dict, output, row_sweep
                 );
                 std::cout << "Printing output tree with pvalues:" << std::endl;
                 std::cout << output->to_string_pvalue() << std::endl;
@@ -261,9 +372,42 @@ long long Instance::solve() {
                 CornerRowParams corner_row;
                 corner_row.k = corner_row_k;
                 corner_row.heavy = corner_row_heavy;
-                corner_row.tau = (corner_row_tau < 0.0)
-                    ? (1.0 + rowsweep_delta) / 4.0 : corner_row_tau;
                 corner_row.query_alpha = rowsweep_query_alpha;
+                {
+                    // The oracle has to be parsed first: it fixes how many
+                    // tracks there are, and so how many taus are wanted.
+                    std::string cr_error;
+                    corner_row.oracle = OracleSpec::parse(oracle_spec,
+                                                          rowsweep_query_alpha,
+                                                          oracle_cf_max,
+                                                          oracle_margin, &cr_error);
+                    if (!cr_error.empty()) {
+                        std::cout << "\nERROR: " << cr_error << std::endl;
+                        exit(1);
+                    }
+                }
+                {
+                    std::vector<std::string> texts = corner_row_tau_spec.empty()
+                        ? std::vector<std::string>(1,
+                              std::to_string((1.0 + rowsweep_delta) / 4.0))
+                        : split_csv(corner_row_tau_spec);
+                    const std::size_t n_tracks = corner_row.oracle.tracks.size();
+                    if (texts.size() != 1 && texts.size() != n_tracks) {
+                        std::cout << "\nERROR: --corner-tau needs one value or "
+                                  << "one per oracle track" << std::endl;
+                        exit(1);
+                    }
+                    for (std::size_t t = 0; t < n_tracks; ++t) {
+                        weight_t tau;
+                        const std::string &text = texts[texts.size() == 1 ? 0 : t];
+                        if (!s2d(text, &tau) || !(tau > 0.0 && tau < 1.0)) {
+                            std::cout << "\nERROR: corner-row tau must lie in "
+                                      << "(0, 1): " << text << std::endl;
+                            exit(1);
+                        }
+                        corner_row.tau.push_back(tau);
+                    }
+                }
                 corner_row.seed = corner_row_seed;
                 SpeciesTree* corner_row_tree = new SpeciesTree(
                     input, dict, output, corner_row
@@ -492,6 +636,70 @@ int Instance::parse(int argc, char **argv) {
         }
         else if (opt == "--rowsweep-blob") {
             row_sweep_blob = true;
+        }
+        else if (opt == "--oracle") {
+            if (i < argc - 1) {
+                oracle_spec = argv[++ i];
+            }
+            else {
+                std::cout << "\nERROR: No oracle spec specified" << std::endl;
+                return 2;
+            }
+        }
+        else if (opt == "--oracle-cf-max") {
+            if (i < argc - 1) {
+                if (!s2d(argv[++ i], &oracle_cf_max) || oracle_cf_max <= 0.0) {
+                    std::cout << "\nERROR: oracle cf-max must be positive" << std::endl;
+                    return 2;
+                }
+            }
+            else {
+                std::cout << "\nERROR: No cf-max specified" << std::endl;
+                return 2;
+            }
+        }
+        else if (opt == "--oracle-margin") {
+            if (i < argc - 1) {
+                if (!s2d(argv[++ i], &oracle_margin) || oracle_margin < 0.0
+                        || oracle_margin >= 1.0) {
+                    std::cout << "\nERROR: oracle margin must lie in [0, 1)" << std::endl;
+                    return 2;
+                }
+            }
+            else {
+                std::cout << "\nERROR: No margin specified" << std::endl;
+                return 2;
+            }
+        }
+        else if (opt == "--rowsweep-tau") {
+            if (i < argc - 1) {
+                rowsweep_tau_spec = argv[++ i];
+            }
+            else {
+                std::cout << "\nERROR: No tau specified" << std::endl;
+                return 2;
+            }
+        }
+        else if (opt == "--rowsweep-heavy") {
+            if (i < argc - 1) {
+                rowsweep_heavy_spec = argv[++ i];
+            }
+            else {
+                std::cout << "\nERROR: No heavy specified" << std::endl;
+                return 2;
+            }
+        }
+        else if (opt == "--rowsweep-anchors") {
+            if (i < argc - 1) {
+                if (!s2ul(argv[++ i], &rowsweep_anchors)) {
+                    std::cout << "\nERROR: invalid anchor count" << std::endl;
+                    return 2;
+                }
+            }
+            else {
+                std::cout << "\nERROR: No anchor count specified" << std::endl;
+                return 2;
+            }
         }
         else if (opt == "--cornerrow-blob") {
             corner_row_blob = true;
@@ -772,6 +980,21 @@ int Instance::parse(int argc, char **argv) {
                 return 2;
             }
         }
+        else if (opt == "--rowsweep-dump") {
+            if (i < argc - 1) {
+                rowsweep_dump_prefix = argv[++ i];
+            }
+            else {
+                std::cout << "\nERROR: No rowsweep dump prefix specified" << std::endl;
+                return 2;
+            }
+        }
+        else if (opt == "--rowsweep-dump-all-targets") {
+            rowsweep_dump_all_targets = true;
+        }
+        else if (opt == "--rowsweep-dump-all-anchors") {
+            rowsweep_dump_all_anchors = true;
+        }
         else if (opt == "--delta") {
             if (i < argc - 1) {
                 rowsweep_delta = std::stod(argv[++ i]);
@@ -799,12 +1022,11 @@ int Instance::parse(int argc, char **argv) {
             }
         }
         else if (opt == "--corner-tau") {
-            std::string param = "";
-            if (i < argc - 1) param = argv[++ i];
-            if (!s2d(param, &corner_row_tau) || !std::isfinite(corner_row_tau) ||
-                    corner_row_tau <= 0.0 || corner_row_tau >= 1.0) {
-                std::cout << "\nERROR: --corner-tau must be strictly between 0 and 1: "
-                          << param << std::endl;
+            if (i < argc - 1) {
+                corner_row_tau_spec = argv[++ i];
+            }
+            else {
+                std::cout << "\nERROR: No corner-row tau specified" << std::endl;
                 return 2;
             }
         }
@@ -873,11 +1095,11 @@ int Instance::parse(int argc, char **argv) {
     if (corner_row_blob) {
         std::cout << "corner-row query alpha: " << rowsweep_query_alpha << std::endl;
         std::cout << "corner-row tau: ";
-        if (corner_row_tau < 0.0)
+        if (corner_row_tau_spec.empty())
             std::cout << (1.0 + rowsweep_delta) / 4.0 << " (from delta = "
                       << rowsweep_delta << ")" << std::endl;
         else
-            std::cout << corner_row_tau << std::endl;
+            std::cout << corner_row_tau_spec << std::endl;
         std::cout << "corner-row k: ";
         if (corner_row_k == 0) std::cout << "n-3" << std::endl;
         else std::cout << corner_row_k << std::endl;

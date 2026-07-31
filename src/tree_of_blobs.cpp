@@ -1877,17 +1877,88 @@ static int topology_for_pair(const index_t *sorted, index_t a, index_t b) {
     return -1;
 }
 
+// Parse an oracle spec such as "t1", "t1+cf" or "t1+cf|maj". Terms joined by
+// '+' are conjunctions within one track; tracks joined by '|' are alternatives,
+// each carrying its own row threshold and corroboration requirement.
+OracleSpec OracleSpec::parse(const std::string &text, weight_t query_alpha,
+                             weight_t cf_max, weight_t margin,
+                             std::string *error) {
+    OracleSpec spec;
+    spec.query_alpha = query_alpha;
+    spec.cf_max = cf_max;
+    spec.margin = margin;
+
+    std::size_t pos = 0;
+    while (pos <= text.size()) {
+        const std::size_t bar = text.find('|', pos);
+        const std::string track_text =
+            text.substr(pos, bar == std::string::npos ? std::string::npos : bar - pos);
+        OracleTerm term = {false, false, false, false};
+        std::size_t tpos = 0;
+        while (tpos <= track_text.size()) {
+            const std::size_t plus = track_text.find('+', tpos);
+            std::string name = track_text.substr(
+                tpos, plus == std::string::npos ? std::string::npos : plus - tpos);
+            // Trim, so "t1 + cf" parses like "t1+cf".
+            while (!name.empty() && std::isspace((unsigned char) name.front())) name.erase(name.begin());
+            while (!name.empty() && std::isspace((unsigned char) name.back())) name.pop_back();
+            if (name == "t1") term.use_t1 = true;
+            else if (name == "t3") term.use_t3 = true;
+            else if (name == "cf") term.use_cf = true;
+            else if (name == "maj") term.use_majority = true;
+            else if (!name.empty()) {
+                if (error) *error = "unknown oracle test: " + name;
+                return spec;
+            }
+            if (plus == std::string::npos) break;
+            tpos = plus + 1;
+        }
+        if (!term.use_t1 && !term.use_t3 && !term.use_majority) {
+            // "cf" alone is a guard, not a test; it can only narrow something.
+            if (error) *error = "each oracle track needs t1, t3 or maj";
+            return spec;
+        }
+        spec.tracks.push_back(term);
+        if (bar == std::string::npos) break;
+        pos = bar + 1;
+    }
+    if (spec.tracks.empty() && error) *error = "empty oracle spec";
+    return spec;
+}
+
+std::string OracleSpec::to_string() const {
+    std::string out;
+    for (std::size_t i = 0; i < tracks.size(); ++i) {
+        if (i) out += "|";
+        std::string term;
+        if (tracks[i].use_t1) term += "t1";
+        if (tracks[i].use_t3) term += term.empty() ? "t3" : "+t3";
+        if (tracks[i].use_cf) term += term.empty() ? "cf" : "+cf";
+        if (tracks[i].use_majority) term += term.empty() ? "maj" : "+maj";
+        out += term;
+    }
+    return out;
+}
+
 // Statistical stand-in for the oracle predicate Query(x,y,rho,r) == xy|rho r.
-// T1 tests this specific quartet tree, so its concordant qCF count must be
-// passed first. With observed quartets, true means "xy|rho r was not rejected
-// at alpha" and false means T1 rejected it. RowSweepTest treats false as a
-// contradiction. A rejection can reflect a 4-blob, a different tree topology,
-// or sampling error; it is not by itself a unique diagnosis of a 4-blob. An
-// exact oracle predicate returns false for a 4-blob, but this finite-sample T1
-// surrogate can fail to detect one.
+// Returns true when the 4-set agrees with the target quartet under `track` of
+// `oracle`, false when it contradicts it.
+//
+// The "t1" track is the original surrogate, unchanged: T1 tests this specific
+// quartet tree, so its concordant qCF count is passed first, and false means T1
+// rejected the target at query_alpha. A rejection can reflect a 4-blob, a
+// different tree topology, or sampling error; it is not by itself a unique
+// diagnosis of a 4-blob, and this finite-sample surrogate can also fail to
+// detect one.
+//
+// The optional "cf" guard and "maj" test are described on OracleSpec. The qCF
+// counts and T1 p-values are cached per 4-set, so a track that does not need T1
+// never pays for the R call -- which also makes "t1+cf" cheaper than "t1",
+// since a highly concordant quartet short-circuits before the p-value.
 bool SpeciesTree::query_pairs_together(std::vector<Tree *> &input, index_t x,
                                        index_t y, index_t rho, index_t r,
-                                       double alpha) {
+                                       const OracleSpec &oracle,
+                                       std::size_t track) {
     index_t sorted[4] = {x, y, rho, r};
     std::sort(sorted, sorted + 4);
     for (int i = 1; i < 4; ++i) {
@@ -1909,7 +1980,35 @@ bool SpeciesTree::query_pairs_together(std::vector<Tree *> &input, index_t x,
     const std::array<weight_t, 3> &qcfs = qcf_it->second;
     // The oracle model always answers; its empirical surrogate cannot run T1
     // when no input gene tree resolves this four-taxon set.
-    if (qcfs[0] + qcfs[1] + qcfs[2] == 0) return false;//todo, is this valid?
+    const weight_t total = qcfs[0] + qcfs[1] + qcfs[2];
+    if (total == 0) return false;//todo, is this valid?
+
+    const OracleTerm &term = oracle.tracks[track < oracle.tracks.size() ? track : 0];
+
+    if (term.use_majority) {
+        const weight_t best = std::max(qcfs[0], std::max(qcfs[1], qcfs[2]));
+        if (!((best - qcfs[target]) / total > oracle.margin)) return true;
+        if (!term.use_t1) return false;
+    }
+
+    // A strongly concordant quartet cannot be evidence against the split, no
+    // matter how significant its minor asymmetry is.
+    if (term.use_cf && qcfs[target] / total >= oracle.cf_max) return true;
+
+    if (term.use_t3) {
+        // T3 sorts the counts internally, so its p-value depends only on the
+        // 4-set, not on which topology is the target: one cache slot each.
+        auto t3_it = row_sweep_t3_pvalues_cache.find(quartet);
+        if (t3_it == row_sweep_t3_pvalues_cache.end()) {
+            weight_t counts[3] = {qcfs[0], qcfs[1], qcfs[2]};
+            t3_it = row_sweep_t3_pvalues_cache.emplace(
+                quartet, (weight_t) pvalue(counts)).first;
+        }
+        if (t3_it->second >= oracle.query_alpha) return true;   // a tree does fit
+        if (!term.use_t1) return false;
+    }
+
+    if (!term.use_t1) return true;
 
     auto p_it = row_sweep_t1_pvalues_cache.find(quartet);
     if (p_it == row_sweep_t1_pvalues_cache.end()) {
@@ -1929,54 +2028,107 @@ bool SpeciesTree::query_pairs_together(std::vector<Tree *> &input, index_t x,
     }
 
     // MSCquartets marks p < alpha as a rejection of the specified T1 tree.
-    return p >= alpha;
+    return p >= oracle.query_alpha;
 }
 
-// RowSweepTest(A, B, delta) -> true = ACCEPT, false = REJECT
-// Index-based version of row_sweep_test: takes taxon indices directly instead
-// of Node* pointers, so it can be driven from a plain-text bipartition file
-// without needing a base tree.
+// The anchors the sweep uses: `count` taxa spread evenly through R, always
+// including R[0] so that count == 1 is the original single-anchor sweep.
+// Duplicates are dropped, so the result may be shorter than `count`.
+static std::vector<std::size_t> row_sweep_anchors(std::size_t m,
+                                                  unsigned long int count) {
+    std::vector<std::size_t> out;
+    if (count == 0 || count >= m) {
+        for (std::size_t i = 0; i < m; ++i) out.push_back(i);
+        return out;
+    }
+    for (unsigned long int i = 0; i < count; ++i) {
+        std::size_t a = (std::size_t) ((i * m) / count);
+        if (std::find(out.begin(), out.end(), a) == out.end()) out.push_back(a);
+    }
+    return out;
+}
+
+// RowSweepTest(A, B) -> true = ACCEPT, false = REJECT
+//
+// Takes taxon indices directly instead of Node* pointers, so it can be driven
+// from a plain-text bipartition file without needing a base tree.
+//
+// With the defaults (oracle "t1", one track, tau = (1+delta)/4, heavy = 1,
+// anchors = 1) this is exactly the algorithm as originally published: fix
+// rho = R[0], count for each row (x, r) how many y in S\{x} contradict, and
+// reject as soon as one row exceeds tau*(s-1).
+//
+// The generalisations, each inert at its default:
+//   - several oracle tracks, each with its own tau and heavy, rejecting if any
+//     track fires; a noisy indicator can then be admitted under a stricter rule
+//     than a reliable one;
+//   - heavy[t] > 1 demands bad rows at that many distinct partners r, which
+//     rejects the single anomalous (rho, r) pair that manufactures most false
+//     rejections, at the cost of detections on edges whose blob signal reaches
+//     only one partner;
+//   - anchors > 1 repeats the sweep from several taxa of R.
 bool SpeciesTree::row_sweep_test_idx(std::vector<Tree *> &input,
                                      const std::vector<index_t> &A,
                                      const std::vector<index_t> &B,
-                                     double delta,
-                                     double query_alpha) {
+                                     const RowSweepParams &params) {
     const std::vector<index_t> &S = (A.size() >= B.size()) ? A : B;  // larger side
     const std::vector<index_t> &R = (A.size() >= B.size()) ? B : A;  // smaller side
-    const size_t s = S.size();
-    if (s < 2 || R.size() < 2) return true;   // not testable -> ACCEPT (trivial split)
+    const std::size_t s = S.size();
+    const std::size_t m = R.size();
+    if (s < 2 || m < 2) return true;   // not testable -> ACCEPT (trivial split)
 
-    const size_t r_free = R.size() - 1;          // |R \ {rho}|
-    const double theta  = (1.0 + delta) / 4.0;
-    const index_t rho   = R[0];
+    const std::size_t n_tracks = params.oracle.tracks.size();
+    const std::vector<std::size_t> anchors = row_sweep_anchors(m, params.anchors);
 
-    std::vector<std::vector<size_t>> c(s, std::vector<size_t>(r_free, 0));
+    for (std::size_t ai = 0; ai < anchors.size(); ++ai) {
+        const index_t rho = R[anchors[ai]];
 
-    for (size_t xi = 0; xi < s; xi++) {
-        for (size_t yi = xi + 1; yi < s; yi++) {
-            const index_t x = S[xi];
-            const index_t y = S[yi];
-            for (size_t ri = 0; ri < r_free; ri++) {
-                const index_t r = R[ri + 1];
-                // Count the empirical surrogate for q != xy|rho r. An exact
-                // 4-blob answer belongs here; with observations, it is counted
-                // when T1 detects the contradiction. No-data queries are also
-                // treated as false.
-                if (!query_pairs_together(input, x, y, rho, r, query_alpha)) {
-                    c[xi][ri]++;
-                    c[yi][ri]++;
+        // The partners of this anchor, in R's order minus the anchor itself.
+        std::vector<index_t> rest;
+        rest.reserve(m - 1);
+        for (std::size_t j = 0; j < m; ++j)
+            if (j != anchors[ai]) rest.push_back(R[j]);
+        const std::size_t r_free = rest.size();
+
+        for (std::size_t t = 0; t < n_tracks; ++t) {
+            const double tau = (double) params.tau[t];
+            const unsigned long int heavy =
+                params.heavy[t] == 0 ? 1 : params.heavy[t];
+
+            std::vector<std::vector<std::size_t>> c(s, std::vector<std::size_t>(r_free, 0));
+            for (std::size_t xi = 0; xi < s; xi++) {
+                for (std::size_t yi = xi + 1; yi < s; yi++) {
+                    for (std::size_t ri = 0; ri < r_free; ri++) {
+                        // Count the empirical surrogate for q != xy|rho r. An
+                        // exact 4-blob answer belongs here; with observations it
+                        // is counted when the oracle track detects it. No-data
+                        // queries are also treated as false.
+                        if (!query_pairs_together(input, S[xi], S[yi], rho,
+                                                  rest[ri], params.oracle, t)) {
+                            c[xi][ri]++;
+                            c[yi][ri]++;
+                        }
+                    }
                 }
             }
-        }
-    }
 
-    for (size_t xi = 0; xi < s; xi++) {
-        for (size_t ri = 0; ri < r_free; ri++) {
-            double phat = (double) c[xi][ri] / (double)(s - 1);
-            if (phat > theta) return false;   // REJECT
+            // A partner corroborates when at least one of its rows is bad; the
+            // requirement is capped at the partners available, so an edge whose
+            // smaller side holds two taxa behaves as it always did.
+            std::size_t corroborating = 0;
+            for (std::size_t ri = 0; ri < r_free; ri++) {
+                for (std::size_t xi = 0; xi < s; xi++) {
+                    if ((double) c[xi][ri] / (double) (s - 1) > tau) {
+                        corroborating++;
+                        break;
+                    }
+                }
+            }
+            const std::size_t needed = std::min((std::size_t) heavy, r_free);
+            if (corroborating >= needed && corroborating > 0) return false;  // REJECT
         }
     }
-    return true;                              // ACCEPT
+    return true;                                                             // ACCEPT
 }
 
 // Annotate every edge in a binary refinement with the row-sweep decision and
@@ -1984,9 +2136,9 @@ bool SpeciesTree::row_sweep_test_idx(std::vector<Tree *> &input,
 // and REJECT as qtt_p=0 on the supplied refinement. Row sweep has no quartet
 // star test, so qst_p is fixed at zero.
 SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
-                         SpeciesTree* display, weight_t row_sweep_delta,
-                         weight_t query_alpha) {
-    std::cout << "Constructing tree of blobs using row-sweep search" << std::endl;
+                         SpeciesTree* display, const RowSweepParams &row_sweep) {
+    std::cout << "Constructing tree of blobs using row-sweep search"
+              << " (oracle " << row_sweep.oracle.to_string() << ")" << std::endl;
 
     add_r_libpaths_and_load(RINS);
     for (Tree *t : input) t->LCA_preprocessing();
@@ -2016,9 +2168,7 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
         if (edge->isfake) {
             std::cout << "fake ***" << std::endl;
         } else {
-            accept = row_sweep_test_idx(
-                input, A, B, row_sweep_delta, query_alpha
-            );
+            accept = row_sweep_test_idx(input, A, B, row_sweep);
             std::cout << "row-sweep: " << (accept ? "ACCEPT" : "REJECT")
                       << "; qtt_p: " << (accept ? 1 : 0) << std::endl;
         }
@@ -2150,10 +2300,13 @@ static void corner_row_sample_indices(std::uint64_t population,
 // oracle query is issued, as the theorem's query-independence assumption requires;
 // Phase 2 then classifies each edge, terminating as soon as one row flags it.
 //
-// The oracle O is replaced by the same T1 tree-test surrogate the row sweep uses:
-// query_pairs_together(x, y, c_1, c_2) is false exactly when T1 rejects
-// xy | c_1 c_2 at query_alpha, which is what the algorithm counts as a
-// contradiction. Query results are cached inside that surrogate, so a 4-set shared
+// The oracle O is replaced by the same configurable surrogate the row sweep
+// uses: query_pairs_together(x, y, c_1, c_2, oracle) is false when that oracle
+// spec judges the 4-set to contradict xy | c_1 c_2, which is what the algorithm
+// counts as a contradiction. With the default spec "t1" that is exactly "T1
+// rejects at query_alpha", i.e. the original behaviour. Corner row is the method
+// most likely to profit from a spec aimed squarely at 4-blob signal, since a
+// blob is all it is looking for. Query results are cached inside that surrogate, so a 4-set shared
 // by several rows or edges is only evaluated once.
 SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                          SpeciesTree *display,
@@ -2198,7 +2351,14 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
     // its lemmas hold for any sample size at most the row population, so a
     // larger row can only sharpen the guarantee.
     const unsigned long int heavy = (corner_row.heavy == 0) ? 1 : corner_row.heavy;
-    const double tau = (double) corner_row.tau;
+    const std::size_t n_tracks = corner_row.oracle.tracks.size();
+    if (corner_row.tau.size() != n_tracks) {
+        std::cout << "\nERROR: corner-row needs one tau per oracle track ("
+                  << n_tracks << " expected, " << corner_row.tau.size()
+                  << " given)" << std::endl;
+        exit(1);
+    }
+    const double tau = (double) corner_row.tau[0];
     if (!(tau > 0.0 && tau < 1.0)) {
         std::cout << "\nERROR: corner-row tau must lie strictly between 0 and 1: "
                   << tau << std::endl;
@@ -2310,28 +2470,33 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
             std::cout << "corner-row: ACCEPT (trivial split, not tested)"
                       << std::endl;
         } else {
-            for (const CornerRowSample &row : rows[i]) {
-                // Rows may differ in size under heavy sampling, so the flagging
-                // rule c > tau * k is applied to each row's own sample size.
-                const double threshold = tau * (double) row.tuples.size();
-                std::size_t contradictions = 0;
-                for (const std::array<index_t, 3> &tuple : row.tuples) {
-                    if (!query_pairs_together(input, row.x, tuple[0], tuple[1],
-                                              tuple[2], corner_row.query_alpha)) {
-                        contradictions++;
-                        if ((double) contradictions > threshold) {
-                            // The count only grows, so the remaining queries of
-                            // this row cannot change its verdict.
-                            witness[0] = row.x;
-                            witness[1] = tuple[0];
-                            witness[2] = tuple[1];
-                            witness[3] = tuple[2];
-                            have_witness = true;
-                            break;
+            // Each oracle track is swept over the same rows with its own tau,
+            // and the edge is flagged if any of them finds a bad row.
+            for (std::size_t t = 0; t < n_tracks && !flagged; ++t) {
+                const double tau_t = (double) corner_row.tau[t];
+                for (const CornerRowSample &row : rows[i]) {
+                    // Rows may differ in size under heavy sampling, so the
+                    // flagging rule c > tau * k uses each row's own sample size.
+                    const double threshold = tau_t * (double) row.tuples.size();
+                    std::size_t contradictions = 0;
+                    for (const std::array<index_t, 3> &tuple : row.tuples) {
+                        if (!query_pairs_together(input, row.x, tuple[0], tuple[1],
+                                                  tuple[2], corner_row.oracle, t)) {
+                            contradictions++;
+                            if ((double) contradictions > threshold) {
+                                // The count only grows, so the remaining queries
+                                // of this row cannot change its verdict.
+                                witness[0] = row.x;
+                                witness[1] = tuple[0];
+                                witness[2] = tuple[1];
+                                witness[3] = tuple[2];
+                                have_witness = true;
+                                break;
+                            }
                         }
                     }
+                    if (have_witness) { flagged = true; break; }
                 }
-                if (have_witness) { flagged = true; break; }
             }
             std::cout << "corner-row: " << (flagged ? "REJECT" : "ACCEPT")
                       << "; qtt_p: " << (flagged ? 0 : 1) << std::endl;
@@ -2375,6 +2540,144 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
     root = build_refinement(display->root, contracted);
 }
 
+// Instrumentation for offline study of the row-sweep decision rule.
+//
+// Issues exactly the queries row_sweep_test_idx would issue on every internal
+// edge of this refinement, but records the evidence instead of thresholding it:
+// the qCF counts and the MSCquartets T1 p-value of every distinct 4-set. No
+// decision is made and no existing code path is affected, so a dump costs the
+// same as one row-sweep run and reproduces its inputs exactly.
+//
+// Two files are written:
+//   <prefix>.meta.json     taxon labels, refined newick, and per-edge S/R/rho
+//   <prefix>.quartets.bin  little-endian records, one per distinct 4-set:
+//                            int32 t[4]   taxon indices, ascending
+//                            float64 q[3] qCF counts for t0t1|t2t3, t0t2|t1t3,
+//                                         t0t3|t1t2
+//                            float64 p[3] T1 p-value of the same three
+//                                         topologies; NaN when not queried
+// With all_targets set, the three p-values are always filled in, which costs
+// extra R calls but lets an offline rule score topologies the sweep never asked
+// about.
+void SpeciesTree::dump_row_sweep_evidence(std::vector<Tree *> &input,
+                                          const std::string &out_prefix,
+                                          const OracleSpec &oracle,
+                                          bool all_targets,
+                                          bool all_anchors) {
+    add_r_libpaths_and_load(RINS);
+    for (Tree *t : input) t->LCA_preprocessing();
+    refine();
+
+    std::vector<Node *> internal;
+    std::vector<std::pair<std::vector<Node *>, std::vector<Node *>>> bips;
+    get_bipartitions(&internal, &bips);
+    std::cout << bips.size() << " branches to dump" << std::endl;
+
+    std::ofstream meta(out_prefix + ".meta.json");
+    if (meta.fail()) {
+        std::cout << "\nERROR: Unable to write to " << out_prefix << ".meta.json" << std::endl;
+        exit(1);
+    }
+    meta << "{\n  \"query_alpha\": " << oracle.query_alpha
+         << ",\n  \"all_targets\": " << (all_targets ? "true" : "false")
+         << ",\n  \"all_anchors\": " << (all_anchors ? "true" : "false")
+         << ",\n  \"ntaxa\": " << dict->size() << ",\n  \"taxa\": [";
+    for (index_t idx = 0; idx < dict->size(); ++idx)
+        meta << (idx ? ", " : "") << "\"" << dict->index2label(idx) << "\"";
+    meta << "],\n  \"refinement_newick\": \"" << to_string_basic() << "\",\n  \"edges\": [\n";
+
+    for (std::size_t i = 0; i < internal.size(); ++i) {
+        Node *edge = internal[i];
+        std::vector<index_t> A, B;
+        A.reserve(bips[i].first.size());
+        B.reserve(bips[i].second.size());
+        for (Node *leaf : bips[i].first) A.push_back(leaf->index);
+        for (Node *leaf : bips[i].second) B.push_back(leaf->index);
+
+        // Mirror row_sweep_test_idx's choice of sides, anchor, and loop order.
+        const std::vector<index_t> &S = (A.size() >= B.size()) ? A : B;
+        const std::vector<index_t> &R = (A.size() >= B.size()) ? B : A;
+        const bool testable = (S.size() >= 2 && R.size() >= 2);
+
+        meta << (i ? ",\n" : "") << "    {\"id\": " << i
+             << ", \"isfake\": " << (edge->isfake ? "true" : "false")
+             << ", \"testable\": " << (testable ? "true" : "false")
+             << ", \"S\": [";
+        for (std::size_t j = 0; j < S.size(); ++j) meta << (j ? "," : "") << S[j];
+        meta << "], \"R\": [";
+        for (std::size_t j = 0; j < R.size(); ++j) meta << (j ? "," : "") << R[j];
+        meta << "]}";
+
+        if (!testable || edge->isfake) continue;
+
+        const index_t rho = R[0];
+        const std::size_t r_free = R.size() - 1;
+        for (std::size_t xi = 0; xi < S.size(); ++xi) {
+            for (std::size_t yi = xi + 1; yi < S.size(); ++yi) {
+                if (all_anchors) {
+                    // Every pair from R, not just the ones containing the
+                    // arbitrary anchor R[0], so an offline rule can re-anchor
+                    // the sweep or average over anchors. Costs a factor |R|/2.
+                    for (std::size_t ai = 0; ai < R.size(); ++ai)
+                        for (std::size_t bi = ai + 1; bi < R.size(); ++bi)
+                            query_pairs_together(input, S[xi], S[yi], R[ai],
+                                                 R[bi], oracle);
+                } else {
+                    for (std::size_t ri = 0; ri < r_free; ++ri) {
+                        // Populates the qCF and T1 caches; the answer is discarded.
+                        query_pairs_together(input, S[xi], S[yi], rho, R[ri + 1],
+                                             oracle);
+                    }
+                }
+            }
+        }
+        std::cout << "Dumped branch id " << i << " (|S|=" << S.size()
+                  << ", |R|=" << R.size() << "); distinct 4-sets so far: "
+                  << row_sweep_qcfs_cache.size() << std::endl;
+    }
+    meta << "\n  ]\n}\n";
+    meta.close();
+
+    std::ofstream bin(out_prefix + ".quartets.bin", std::ios::binary);
+    if (bin.fail()) {
+        std::cout << "\nERROR: Unable to write to " << out_prefix << ".quartets.bin" << std::endl;
+        exit(1);
+    }
+    const double nan_value = std::numeric_limits<double>::quiet_NaN();
+    std::size_t written = 0;
+    for (const auto &entry : row_sweep_qcfs_cache) {
+        index_t packed[4];
+        split(packed, entry.first);
+        std::sort(packed, packed + 4);
+
+        auto p_it = row_sweep_t1_pvalues_cache.find(entry.first);
+        double p[3] = {nan_value, nan_value, nan_value};
+        if (p_it != row_sweep_t1_pvalues_cache.end()) {
+            for (int j = 0; j < 3; ++j) p[j] = (double) p_it->second[j];
+        }
+        if (all_targets && entry.second[0] + entry.second[1] + entry.second[2] > 0) {
+            for (int j = 0; j < 3; ++j) {
+                if (!std::isnan(p[j])) continue;
+                weight_t counts[3] = {entry.second[j], entry.second[(j + 1) % 3],
+                                      entry.second[(j + 2) % 3]};
+                p[j] = (double) pvalue_t1(counts);
+            }
+        }
+
+        int32_t taxa[4];
+        for (int j = 0; j < 4; ++j) taxa[j] = (int32_t) packed[j];
+        double q[3] = {(double) entry.second[0], (double) entry.second[1],
+                       (double) entry.second[2]};
+        bin.write(reinterpret_cast<const char *>(taxa), sizeof(taxa));
+        bin.write(reinterpret_cast<const char *>(q), sizeof(q));
+        bin.write(reinterpret_cast<const char *>(p), sizeof(p));
+        ++written;
+    }
+    bin.close();
+    std::cout << "Wrote " << written << " quartet records to "
+              << out_prefix << ".quartets.bin" << std::endl;
+}
+
 // Parse a comma-separated list of taxon names into indices, using the dict-derived
 // name2index map built by the caller. Exits with an error on an unrecognized name,
 // rather than silently minting a new index (which Dict::label2index would do).
@@ -2401,8 +2704,7 @@ void SpeciesTree::run_split_experiment(std::vector<Tree *> &input,
         const std::unordered_map<std::string, index_t> &name2index,
         const std::string &bipartition_file,
         const std::string &output_file,
-        double delta,
-        double query_alpha) {
+        const RowSweepParams &params) {
     add_r_libpaths_and_load(RINS);                 // load MSCquartets before any pvalue() call
     for (Tree *t : input) t->LCA_preprocessing();  // required by get_quartet()
     std::ifstream fin(bipartition_file);
@@ -2427,7 +2729,7 @@ void SpeciesTree::run_split_experiment(std::vector<Tree *> &input,
         if (id == "id") continue;                       // header
         std::vector<index_t> A = row_sweep_parse_side(aField, name2index);
         std::vector<index_t> B = row_sweep_parse_side(bField, name2index);
-        bool accept = row_sweep_test_idx(input, A, B, delta, query_alpha);
+        bool accept = row_sweep_test_idx(input, A, B, params);
         fout << id << "\t" << (accept ? 1 : 0) << "\n";
     }
     fin.close();

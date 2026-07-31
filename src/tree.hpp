@@ -5,6 +5,8 @@
 #include "dict.hpp"
 #include "taxa.hpp"
 #include <tuple>
+#include <string>
+#include <vector>
 
 class QCFWriter;
 
@@ -191,12 +193,86 @@ class Tree {
 // row sample size k, the heavy-sampling multiplier, the contradiction threshold
 // tau in (0,1), the per-query level of the T1 test standing in for the oracle,
 // and the private random seed used to draw the row samples in Phase 1.
+// How the quarnet oracle is approximated on observed gene trees.
+//
+// The perfect oracle answers "is the quarnet on {x,y,rho,r} the tree quartet
+// xy|rho r". Every stand-in answers something narrower, and which one is used
+// matters more than the aggregation rule built on top. A spec is parsed from a
+// string so that every method (row sweep, corner row, ...) can be pointed at the
+// same set of approximations:
+//
+//   "t1"          T1 rejects the target at query_alpha. What has always shipped.
+//   "t1+cf"       ... and the target's concordance factor is below cf_max. With
+//                 1000 gene trees T1 rejects on a minor-frequency asymmetry of a
+//                 few percent even when the target holds 90% of the trees; those
+//                 rejections are reticulation signal from elsewhere in the 4-set,
+//                 not evidence against the split. Measured: contradictions on
+//                 true splits have median cf 0.83-0.89, genuine ones ~0.50.
+//   "t3"          T3 rejects, i.e. the qCF vector fits no tree quartet at all.
+//                 This is the closest thing MSCquartets offers to a hypothesis
+//                 test whose alternative is a 4-blob, so it is the natural
+//                 primitive for corner row, which is looking for nothing else.
+//                 Unlike t1 it is target-free: it says "not a tree", not "not
+//                 this tree", so on its own it misses a contradiction that comes
+//                 from a different tree quartet.
+//   "maj"         the observed majority topology is not the target, by more than
+//                 `margin`. No significance test, so it is far more sensitive and
+//                 far noisier; it is the only one of these that sees an ASTRAL
+//                 resolution error, because those sit on branches so short that
+//                 T1 has no power.
+//
+// Terms joined by '|' are separate *tracks*: each gets its own row threshold and
+// its own corroboration requirement, and an edge is rejected if any track fires.
+// That is what lets a noisy indicator be admitted under a stricter rule than a
+// reliable one.
+struct OracleTerm {
+    bool use_t1;        // require T1 to reject the target
+    bool use_t3;        // require T3 to reject every tree quartet
+    bool use_cf;        // require the target concordance factor < cf_max
+    bool use_majority;  // require some other topology to lead by > margin
+};
+
+struct OracleSpec {
+    std::vector<OracleTerm> tracks;
+    weight_t query_alpha;
+    weight_t cf_max;
+    weight_t margin;
+
+    // "t1" (the default) reproduces the original surrogate exactly.
+    static OracleSpec parse(const std::string &text, weight_t query_alpha,
+                            weight_t cf_max, weight_t margin, std::string *error);
+    std::string to_string() const;
+};
+
+// Row sweep configuration. Defaults reproduce the original algorithm exactly:
+// one track "t1", tau = (1+delta)/4, heavy = 1, anchors = 1.
+//
+// `tau` is exposed directly because deriving it as (1+delta)/4 confines delta in
+// [0, 1/3) to tau in [0.25, 0.333), and almost no row lands in that band -- which
+// is why the published delta sweep is nearly flat. tau = 0.45 is a small but
+// consistent improvement and is unreachable through delta.
+//
+// `heavy[t]` demands that track t find a bad row at that many *distinct* partners
+// r, capped at the number of partners the edge has (so an edge whose smaller side
+// holds two taxa is unaffected). Note this is a different quantity from
+// CornerRowParams::heavy, which scales a row's sample size.
+//
+// `anchors` > 1 repeats the sweep from several taxa of R rather than always R[0].
+// It helped at n15 and not at n25; see results/analysis/ROWSWEEP_FINDINGS.md.
+struct RowSweepParams {
+    OracleSpec oracle;
+    std::vector<weight_t> tau;            // one per track
+    std::vector<unsigned long int> heavy; // one per track
+    unsigned long int anchors;            // 0 means every taxon of R
+};
+
 struct CornerRowParams {
     unsigned long int k;        // 0 requests the largest legal value, n - 3
     unsigned long int heavy;    // row m draws min(heavy * k, |Omega_x(e)|) tuples
-    weight_t tau;
+    std::vector<weight_t> tau;  // one per oracle track
     weight_t query_alpha;
     unsigned long int seed;
+    OracleSpec oracle;          // "t1" reproduces the original behaviour exactly
 };
 #endif  // ENABLE_TOB
 
@@ -207,7 +283,7 @@ class SpeciesTree : public Tree {
         SpeciesTree(std::string stree_file, Dict *dict);
         #if ENABLE_TOB
         SpeciesTree(Tree *input, Dict *dict, weight_t alpha, weight_t beta, bool enable_split_test);
-        SpeciesTree(std::vector<Tree *> &input, Dict *dict, SpeciesTree* display, weight_t row_sweep_delta, weight_t query_alpha);
+        SpeciesTree(std::vector<Tree *> &input, Dict *dict, SpeciesTree* display, const RowSweepParams &row_sweep);
         SpeciesTree(std::vector<Tree *> &input, Dict *dict, SpeciesTree* display, const CornerRowParams &corner_row);
         SpeciesTree(std::vector<Tree *> &input, Dict *dict, SpeciesTree* display, QCFWriter *qcf_writer = nullptr);
         SpeciesTree(std::vector<Tree *> &input, Dict *dict, SpeciesTree* display, unsigned long int iter_limit_blob, QCFWriter *qcf_writer = nullptr);
@@ -234,7 +310,8 @@ class SpeciesTree : public Tree {
         #if ENABLE_TOB
         std::string to_string_pvalue();
         std::string display_tree_pvalue(Node *root);
-        void run_split_experiment(std::vector<Tree *> &input, const std::unordered_map<std::string, index_t> &name2index, const std::string &bipartition_file, const std::string &output_file, double delta, double query_alpha);
+        void run_split_experiment(std::vector<Tree *> &input, const std::unordered_map<std::string, index_t> &name2index, const std::string &bipartition_file, const std::string &output_file, const RowSweepParams &params);
+        void dump_row_sweep_evidence(std::vector<Tree *> &input, const std::string &out_prefix, const OracleSpec &oracle, bool all_targets, bool all_anchors);
         #endif  // ENABLE_TOB
     private:
         index_t artifinyms;
@@ -246,6 +323,7 @@ class SpeciesTree : public Tree {
         // Empirical oracle caches are isolated from the legacy T3/blob searches.
         std::unordered_map<quartet_t, std::array<weight_t, 3>> row_sweep_qcfs_cache;
         std::unordered_map<quartet_t, std::array<weight_t, 3>> row_sweep_t1_pvalues_cache;
+        std::unordered_map<quartet_t, weight_t> row_sweep_t3_pvalues_cache;
         std::unordered_map<quartet_t, std::array<weight_t, 3>> qCFs_average_cache;
         #endif  // ENABLE_TOB
         index_t artifinym();
@@ -320,8 +398,8 @@ class SpeciesTree : public Tree {
         std::array<index_t, 2> siblings_in_two_best_topologies(const std::array<std::array<index_t,4>,2> &best2,
                                              index_t taxon);
         bool is_match_with_split(const std::array<weight_t,3>& qcf, index_t node_a1_id, index_t node_a2_id, index_t *indices);
-        bool query_pairs_together(std::vector<Tree *> &input, index_t x, index_t y, index_t rho, index_t r, double alpha);
-        bool row_sweep_test_idx(std::vector<Tree *> &input, const std::vector<index_t> &A, const std::vector<index_t> &B, double delta, double query_alpha);
+        bool query_pairs_together(std::vector<Tree *> &input, index_t x, index_t y, index_t rho, index_t r, const OracleSpec &oracle, std::size_t track = 0);
+        bool row_sweep_test_idx(std::vector<Tree *> &input, const std::vector<index_t> &A, const std::vector<index_t> &B, const RowSweepParams &params);
         bool corner_sets_for_edge(Tree *refinement, Node *edge, std::vector<index_t> corners[4]);
         weight_t search_2f2a(std::vector<Tree *> &input, std::vector<Node *> &A, std::vector<Node *> &B, index_t* minimizer, size_t &split_match_count, size_t &split_mismatch_count, index_t branch_id = 0, QCFWriter *qcf_writer = nullptr);
         #endif  // ENABLE_TOB
