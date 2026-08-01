@@ -272,6 +272,11 @@ struct CornerRowParams {
     std::vector<weight_t> tau;  // one per oracle track
     weight_t query_alpha;
     unsigned long int seed;
+    bool cross;                 // draw the row partner y from the opposite near
+                                // corner only, so every queried 4-set spans all
+                                // four corners; false reproduces Omega_x(e)
+    std::vector<unsigned long int> corroborate;  // bad rows demanded, per track;
+                                // 1 is the original "flag on the first bad row"
     OracleSpec oracle;          // "t1" reproduces the original behaviour exactly
 };
 #endif  // ENABLE_TOB

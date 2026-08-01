@@ -36,6 +36,8 @@ class Instance {
         bool rowsweep_dump_all_targets, rowsweep_dump_all_anchors;
         weight_t rowsweep_delta, rowsweep_query_alpha;
         unsigned long int corner_row_k, corner_row_heavy, corner_row_seed;
+        bool corner_row_cross;
+        std::string corner_row_corroborate_spec;
         std::string oracle_spec, rowsweep_tau_spec, rowsweep_heavy_spec;
         unsigned long int rowsweep_anchors;
         weight_t oracle_cf_max, oracle_margin;

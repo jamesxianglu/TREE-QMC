@@ -23,6 +23,8 @@ Instance::Instance(int argc, char **argv) {
     corner_row_heavy = 1;    // each row draws min(heavy*k, row population)
     corner_row_tau_spec = "";  // empty selects the default (1+delta)/4
     corner_row_seed = 20250729;
+    corner_row_cross = false;
+    corner_row_corroborate_spec = "";
     // Defaults reproduce the original row sweep exactly. An empty tau spec
     // means "derive it from delta", as (1+delta)/4 always did.
     oracle_spec = "t1";
@@ -408,7 +410,33 @@ long long Instance::solve() {
                         corner_row.tau.push_back(tau);
                     }
                 }
+                {
+                    // One count per oracle track, like --corner-tau: a noisy
+                    // indicator can be made to demand several bad rows while a
+                    // reliable one still fires on the first.
+                    const std::size_t n_tracks = corner_row.oracle.tracks.size();
+                    std::vector<std::string> texts =
+                        corner_row_corroborate_spec.empty()
+                        ? std::vector<std::string>(1, "1")
+                        : split_csv(corner_row_corroborate_spec);
+                    if (texts.size() != 1 && texts.size() != n_tracks) {
+                        std::cout << "\nERROR: --corner-corroborate needs one "
+                                  << "value or one per oracle track" << std::endl;
+                        exit(1);
+                    }
+                    for (std::size_t t = 0; t < n_tracks; ++t) {
+                        unsigned long int value;
+                        const std::string &text = texts[texts.size() == 1 ? 0 : t];
+                        if (!s2ul(text, &value) || value == 0) {
+                            std::cout << "\nERROR: --corner-corroborate must be "
+                                      << "a positive integer: " << text << std::endl;
+                            exit(1);
+                        }
+                        corner_row.corroborate.push_back(value);
+                    }
+                }
                 corner_row.seed = corner_row_seed;
+                corner_row.cross = corner_row_cross;
                 SpeciesTree* corner_row_tree = new SpeciesTree(
                     input, dict, output, corner_row
                 );
@@ -1030,6 +1058,18 @@ int Instance::parse(int argc, char **argv) {
                 return 2;
             }
         }
+        else if (opt == "--corner-corroborate") {
+            if (i < argc - 1) {
+                corner_row_corroborate_spec = argv[++ i];
+            }
+            else {
+                std::cout << "\nERROR: No corner-row corroboration specified" << std::endl;
+                return 2;
+            }
+        }
+        else if (opt == "--corner-cross") {
+            corner_row_cross = true;
+        }
         else if (opt == "--corner-seed") {
             std::string param = "";
             if (i < argc - 1) param = argv[++ i];
@@ -1107,6 +1147,10 @@ int Instance::parse(int argc, char **argv) {
                   << " (each row draws min(" << corner_row_heavy
                   << "k, row population))" << std::endl;
         std::cout << "corner-row seed: " << corner_row_seed << std::endl;
+        std::cout << "corner-row row partners: "
+                  << (corner_row_cross ? "opposite corner only (--corner-cross)"
+                                       : "the whole near side")
+                  << std::endl;
     }
 
     // Output file

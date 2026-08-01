@@ -2365,6 +2365,7 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
         exit(1);
     }
     std::cout << "corner-row parameters: k=" << k << ", heavy=" << heavy
+              << (corner_row.cross ? ", cross" : "")
               << ", tau=" << tau
               << ", query alpha=" << corner_row.query_alpha
               << ", seed=" << corner_row.seed << std::endl;
@@ -2410,6 +2411,9 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
         std::sort(B.begin(), B.end());
         const std::unordered_set<index_t> A_set(A.begin(), A.end());
 
+        const std::unordered_set<index_t> A1_set(A1.begin(), A1.end());
+        const std::unordered_set<index_t> B1_set(B1.begin(), B1.end());
+
         rows[i].reserve(n);
         for (index_t x : taxa) {
             const bool x_in_A = A_set.find(x) != A_set.end();
@@ -2417,13 +2421,28 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
             const std::vector<index_t> &first = x_in_A ? B1 : A1;
             const std::vector<index_t> &second = x_in_A ? B2 : A2;
 
+            // Omega_x(e) = (A \ {x}) x B_1 x B_2 draws the partner y from the
+            // whole near side, so a y in x's own corner gives a 4-set spanning
+            // only three corners. Such a 4-set has a tree quarnet whatever the
+            // edge is, so it can never contradict, and it dilutes the row's
+            // contradiction fraction by the size of x's corner. --corner-cross
+            // draws y from the opposite near corner instead, so every query
+            // spans all four corners. The row population shrinks accordingly.
             std::vector<index_t> partners;
-            partners.reserve(same.size() - 1);
-            for (index_t y : same)
-                if (y != x) partners.push_back(y);
+            if (corner_row.cross) {
+                const std::vector<index_t> &opposite =
+                    x_in_A ? (A1_set.count(x) ? A2 : A1)
+                           : (B1_set.count(x) ? B2 : B1);
+                partners = opposite;
+            } else {
+                partners.reserve(same.size() - 1);
+                for (index_t y : same)
+                    if (y != x) partners.push_back(y);
+            }
 
             const std::uint64_t population = (std::uint64_t) partners.size() *
                 first.size() * second.size();
+            if (population == 0) continue;   // no queryable tuple for this row
             const std::uint64_t row_size =
                 std::min<std::uint64_t>((std::uint64_t) heavy * k, population);
             if (row_size == population) exhaustive_rows++;
@@ -2474,6 +2493,15 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
             // and the edge is flagged if any of them finds a bad row.
             for (std::size_t t = 0; t < n_tracks && !flagged; ++t) {
                 const double tau_t = (double) corner_row.tau[t];
+                // How many distinct rows x must be bad before this track flags
+                // the edge. At 1 the first bad row ends the sweep, which is the
+                // published behaviour; above 1 a single anomalous taxon can no
+                // longer contract an edge on its own -- the corner-row analogue
+                // of the row sweep's --rowsweep-heavy, which demands bad rows at
+                // several partners.
+                const unsigned long int need =
+                    (t < corner_row.corroborate.size()) ? corner_row.corroborate[t] : 1;
+                unsigned long int bad_rows = 0;
                 for (const CornerRowSample &row : rows[i]) {
                     // Rows may differ in size under heavy sampling, so the
                     // flagging rule c > tau * k uses each row's own sample size.
@@ -2486,16 +2514,19 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                             if ((double) contradictions > threshold) {
                                 // The count only grows, so the remaining queries
                                 // of this row cannot change its verdict.
-                                witness[0] = row.x;
-                                witness[1] = tuple[0];
-                                witness[2] = tuple[1];
-                                witness[3] = tuple[2];
-                                have_witness = true;
+                                if (!have_witness) {
+                                    witness[0] = row.x;
+                                    witness[1] = tuple[0];
+                                    witness[2] = tuple[1];
+                                    witness[3] = tuple[2];
+                                    have_witness = true;
+                                }
+                                bad_rows++;
                                 break;
                             }
                         }
                     }
-                    if (have_witness) { flagged = true; break; }
+                    if (bad_rows >= need) { flagged = true; break; }
                 }
             }
             std::cout << "corner-row: " << (flagged ? "REJECT" : "ACCEPT")
