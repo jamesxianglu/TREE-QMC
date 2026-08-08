@@ -1,0 +1,41 @@
+# Per-machine defaults for submit_tob.sh. Copy to site.conf on the machine that
+# needs it; submit_tob.sh sources it if present and ignores it if not, so nothing
+# here has to work anywhere else.
+#
+#   cp site.conf.example site.conf   # then edit for this machine
+#
+# It answers "which interpreter, which modules" -- facts about the machine, not
+# about the experiment, and the same for every run on it. Retyping them on each
+# submission is how one submission ends up without them, which does not announce
+# itself: the jobs run under whatever interpreter the compute nodes resolve and
+# write shards indistinguishable from the rest.
+#
+# Sourced before the command line is parsed, so --python and --modules still win.
+# Whatever is set here is printed before the run and recorded in run.meta.
+#
+# Keep it to these two variables. Anything a job needs in its own environment
+# goes in site_env.sh, which is sourced on the compute node (see
+# site_env.sh.example) -- but for a module-provided python, MODULES below is
+# enough and site_env.sh is not needed at all.
+
+# --- interpreter ------------------------------------------------------------
+# Absolute path to a python that can import treeswift, on storage the compute
+# nodes can see. Not a bare name: a name is resolved against the PATH of whatever
+# machine looks it up, and the machine that submits is not the machine that runs.
+#
+# Leave unset to take $PROJECT_ROOT/.venv/bin/python when it exists, and python3
+# from PATH otherwise.
+#
+# PYTHON_OPT=/fs/cbcb-lab/ekmolloy/jameslu/.venv/bin/python
+
+# --- modules ----------------------------------------------------------------
+# Space-separated modulefiles, loaded before the checks here and again inside
+# every job. Needed when the interpreter above came from a module: a venv built
+# against one still resolves its shared libraries through it.
+#
+# Pin the versions. `module avail` on a login node lists them, and an unpinned
+# name lets a site upgrade change interpreters halfway through a sweep. Note
+# that a version visible under /opt or /usr/local is not necessarily a module,
+# and not necessarily present on the compute nodes.
+#
+# MODULES='Python3/3.11.11'

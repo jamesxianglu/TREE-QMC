@@ -1,0 +1,45 @@
+# Per-machine environment for run_tob.sbatch. Copy to site_env.sh on the machine
+# that needs it; run_tob.sbatch sources it if present and ignores it if not, so
+# nothing here has to work anywhere else.
+#
+#   cp site_env.sh.example site_env.sh   # then edit for this cluster
+#
+# It is sourced inside a job on a compute node, which starts from a bare
+# environment: a module loaded in your login shell is NOT loaded here. Anything
+# the job needs on PATH has to be arranged in this file.
+#
+# Keep it to environment setup. It runs before every dataset.
+
+# --- module system ---------------------------------------------------------
+# Batch shells do not always define the `module` function; source the init
+# script first when it is missing.
+if ! type module >/dev/null 2>&1 && [[ -f /usr/share/lmod/lmod/init/bash ]]; then
+    source /usr/share/lmod/lmod/init/bash
+fi
+
+# Names and versions are site-specific: check `module avail julia python` on a
+# login node and pin the versions, so a site upgrade cannot change results
+# halfway through a sweep.
+#
+# module load julia/1.10.4
+# module load python/3.11.6
+
+# --- julia -----------------------------------------------------------------
+# Only needed for datasets whose true tree of blobs is not yet cached under
+# results/true_tob. If julia is a plain install rather than a module:
+#
+# export PATH="/fs/cbcb-lab/ekmolloy/jameslu/opt/julia-1.10.4/bin:$PATH"
+#
+# PhyloNetworks and the rest are resolved from the depot, which defaults to
+# ~/.julia. Point it at shared storage if home is small or not mounted on the
+# compute nodes:
+#
+# export JULIA_DEPOT_PATH="/fs/cbcb-lab/ekmolloy/jameslu/.julia"
+
+# --- python ----------------------------------------------------------------
+# Nothing to do here. The interpreter is chosen by submit_tob.sh and passed in
+# as an absolute path, and if it needs a module, that is what submit_tob.sh
+# --modules is for -- the job loads it before this file is sourced.
+#
+# Set both once in site.conf instead of per submission; see site.conf.example.
+# This file is only for what site.conf cannot express.

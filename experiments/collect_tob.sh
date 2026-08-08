@@ -34,22 +34,52 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 [[ -n "$RUN_DIR" ]] || { echo "ERROR: --run-dir is required" >&2; exit 1; }
-[[ -d "$RUN_DIR" ]] || { echo "ERROR: no such run directory: $RUN_DIR" >&2; exit 1; }
+
+# A bare label is resolved against the default out-root; a path that does not
+# resolve is answered with the labels that do.
+OUT_ROOT="$PROJECT_ROOT/results/runs"
+if [[ ! -d "$RUN_DIR" && -d "$OUT_ROOT/$RUN_DIR" ]]; then
+    RUN_DIR="$OUT_ROOT/$RUN_DIR"
+fi
+if [[ ! -d "$RUN_DIR" ]]; then
+    echo "ERROR: no such run directory: $RUN_DIR" >&2
+    parent="$(dirname "$RUN_DIR")"
+    [[ -d "$parent" ]] || parent="$OUT_ROOT"
+    if [[ -d "$parent" ]]; then
+        echo "Run directories under $parent:" >&2
+        find "$parent" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; |
+            sort | sed 's/^/  /' >&2
+    fi
+    exit 1
+fi
 [[ -f "$RUN_DIR/run.meta" ]] || { echo "ERROR: $RUN_DIR has no run.meta" >&2; exit 1; }
 
 LABEL="$(sed -n 's/^label=//p' "$RUN_DIR/run.meta")"
 [[ -n "$LABEL" ]] || LABEL="$(basename "$RUN_DIR")"
 [[ -n "$OUT" ]] || OUT="$PROJECT_ROOT/results/$LABEL.csv"
 
-# A dataset directory without a shard is a job that failed or has not finished;
-# silently dropping it would understate the error of whichever configuration
-# happened to crash.
+# A dataset without a shard is a job that failed or has not finished; silently
+# dropping it would understate the error of whichever configuration happened to
+# crash. The expected set comes from datasets.tsv, written by submit_tob.sh: a
+# job that never got submitted leaves no directory either, so counting
+# directories on disk would call a run of three datasets complete.
 expected=0
 missing=0
-while IFS= read -r d; do
-    expected=$((expected + 1))
-    [[ -s "$d/row.csv" ]] || { missing=$((missing + 1)); echo "missing: ${d#$RUN_DIR/}" >&2; }
-done < <(find "$RUN_DIR" -mindepth 2 -maxdepth 2 -type d | sort)
+if [[ -f "$RUN_DIR/datasets.tsv" ]]; then
+    while IFS=$'\t' read -r group rep; do
+        [[ -n "$group" ]] || continue
+        expected=$((expected + 1))
+        [[ -s "$RUN_DIR/$group/$rep/row.csv" ]] ||
+            { missing=$((missing + 1)); echo "missing: $group/$rep" >&2; }
+    done < "$RUN_DIR/datasets.tsv"
+else
+    echo "note: $RUN_DIR has no datasets.tsv (pre-dating it); only the dataset" >&2
+    echo "      directories present on disk can be checked." >&2
+    while IFS= read -r d; do
+        expected=$((expected + 1))
+        [[ -s "$d/row.csv" ]] || { missing=$((missing + 1)); echo "missing: ${d#"$RUN_DIR"/}" >&2; }
+    done < <(find "$RUN_DIR" -mindepth 2 -maxdepth 2 -type d | sort)
+fi
 
 if [[ "$missing" -gt 0 && "$ALLOW_PARTIAL" -eq 0 ]]; then
     echo "ERROR: $missing of $expected datasets have no shard; rerun them or pass --allow-partial" >&2

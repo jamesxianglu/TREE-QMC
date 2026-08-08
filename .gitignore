@@ -2,3 +2,5 @@
 /experiments/results/
 build/
 external/
+/experiments/site_env.sh
+/experiments/site.conf

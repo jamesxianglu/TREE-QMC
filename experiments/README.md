@@ -19,12 +19,48 @@ writing another pair of scripts.
 ## Running one
 
 Nothing is defaulted: a result is only reproducible if its configuration was
-written down, so it has to be typed out.
+written down, so it has to be typed out. The one thing not typed is the gene
+tree file, because it belongs to the dataset rather than to the experiment.
 
 ```sh
-./submit_tob.sh --method rowsweep --runner slurm --gene-trees g_500.nwk \
-    --datasets 'n15 n25 n50 n100 n150 n200' \
+./submit_tob.sh --method rowsweep --runner slurm \
+    --datasets 'n50 n100 n150 n200' \
     --args '--oracle t1+cf|maj --rowsweep-tau 0.45,0.60 --rowsweep-heavy 1,2 --query-alpha 0.001'
+```
+
+Each dataset uses its own `iqtree_500.nwk`, or `g_500.nwk` when it has none, and
+the file that was used is recorded in every row. That is uniform per group in
+this data apart from n25, where only 20 of the 50 replicates have
+`iqtree_500.nwk` and therefore use it while the other 30 use `g_500.nwk` -- a
+split that makes n25 not comparable against itself. `submit_tob.sh` prints the
+breakdown and warns before submitting anything. The four groups above are
+`g_500.nwk` throughout, so they compare against each other; n15 (`iqtree_500.nwk`)
+and n25 each belong to their own row set.
+
+### Once per machine
+
+`--python` and `--modules` describe the machine, not the experiment, so they go
+in `experiments/site.conf` rather than into every command (see
+`site.conf.example`; it is gitignored):
+
+```sh
+PYTHON_OPT=/fs/cbcb-lab/ekmolloy/jameslu/.venv/bin/python
+MODULES='Python3/3.11.11'
+```
+
+`submit_tob.sh` sources it before parsing options, so either flag still
+overrides it, and prints what it took from it. On the CBCB cluster both are
+needed: the compute nodes' bare `python3` is 3.5.10, which cannot import
+treeswift, and the login node's 3.10.10 is under `/opt/local` and is not mounted
+there. Build the venv with the module's interpreter, and check it from a compute
+node rather than from the login node:
+
+```sh
+module load Python3/3.11.11
+python3 -m venv /fs/cbcb-lab/ekmolloy/jameslu/.venv
+/fs/cbcb-lab/ekmolloy/jameslu/.venv/bin/pip install treeswift
+srun --partition=cbcb --account=cbcb bash -lc \
+  'module load Python3/3.11.11 && /fs/cbcb-lab/ekmolloy/jameslu/.venv/bin/python -c "import treeswift"'
 ```
 
 `--runner local` runs the same jobs serially instead of submitting them, which
@@ -46,9 +82,9 @@ measured.
 Reproducing the originally published numbers is just another configuration:
 
 ```sh
-./submit_tob.sh --method rowsweep --runner local --gene-trees iqtree_500.nwk \
+./submit_tob.sh --method rowsweep --runner local \
     --datasets 'n15' --args '--delta 0.25 --query-alpha 0.001'
-./submit_tob.sh --method cornerrow --runner local --gene-trees iqtree_500.nwk \
+./submit_tob.sh --method cornerrow --runner local \
     --datasets 'n15' \
     --args '--corner-k 0 --heavy-sampling 2 --corner-tau 0.3125 --corner-seed 20250729 --query-alpha 0.001'
 ```
