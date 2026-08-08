@@ -141,6 +141,8 @@ const std::string help_info =
 "        refinement; each edge is tested with rows built from its four corner\n"
 "        sets (--corner-k, --corner-tau, --corner-seed, --query-alpha,\n"
 "        --corner-cross, --corner-corroborate)\n"
+"        row sweep row construction: --rowsweep-row-mode\n"
+"        (fixed|random|pooled), --rowsweep-seed\n"
 "[(--corner-k) <non-negative integer>]\n"
 "        Corner-row sample size k per row (default: 0, meaning n-3)\n"
 "[(--heavy-sampling) <positive integer>]\n"

@@ -25,10 +25,33 @@ Instance::Instance(int argc, char **argv) {
     corner_row_seed = 20250729;
     corner_row_cross = false;
     corner_row_corroborate_spec = "";
+    rowsweep_row_mode_spec = "fixed";
+    rowsweep_seed = 20250729;
     // Defaults reproduce the original row sweep exactly. An empty tau spec
     // means "derive it from delta", as (1+delta)/4 always did.
     oracle_spec = "t1";
     rowsweep_tau_spec = "";
+    rowsweep_tau2_spec = "";
+    rowsweep_score_out = "";
+    // tau well below the theorem's 1/2: the theorem's bar assumes a *perfect*
+    // oracle on a fully-bad certificate, but the surrogate detects a known
+    // four-cycle only ~0.673 of the time and a cluster that only approximates
+    // the reticulation branch dilutes that further. Measured over 70 replicates
+    // of n15+n25, J rises monotonically as tau falls: 0.670 at 0.50, 0.739 at
+    // 0.25, 0.756 at 0.15, 0.763 at 0.10 (doc/NEW_ALGORITHMS.md section 3a).
+    branch_cut_tau_spec = "0.15";
+    branch_cut_resolution_z = 0.0;        // deprecated, not scale-free
+    branch_cut_resolution_margin = 0.0;   // off by default
+    branch_cut_propagate_tau = 0.0;       // off by default (no phase 2)
+    branch_cut_cycles = 0;                // 0 = the older uniform random sampling
+    branch_cut_min_support = 4;
+    branch_cut_samples = 8;
+    branch_cut_seed = 20250729;
+    // Corner-row resolution test: off by default, so every earlier corner-row
+    // run reproduces. The sample budget is a multiple of the corner-size sum;
+    // 0 would be exhaustive, which is |A1||A2||B1||B2| ~ n^4/256 per edge.
+    corner_row_resolution_margin = 0.0;
+    corner_row_resolution_samples = 20;
     rowsweep_heavy_spec = "1";
     rowsweep_anchors = 1;
     oracle_cf_max = 0.80;      // only consulted by a "cf" term
@@ -58,6 +81,7 @@ Instance::Instance(int argc, char **argv) {
     two_fix_two_alter = false;
     row_sweep_blob = false;
     corner_row_blob = false;
+    branch_cut_blob = false;
     quard = false;
     network = false;
 
@@ -221,6 +245,36 @@ RowSweepParams Instance::build_row_sweep_params(std::string *error) const {
         params.tau.push_back(tau);
         params.heavy.push_back(heavy);
     }
+    // Second-stage threshold; empty leaves the rule exactly one-stage.
+    if (!rowsweep_tau2_spec.empty()) {
+        std::vector<std::string> tau2s = split_csv(rowsweep_tau2_spec);
+        if (tau2s.size() != 1 && tau2s.size() != n_tracks) {
+            *error = "--rowsweep-tau2 needs one value or one per oracle track";
+            return params;
+        }
+        for (std::size_t t = 0; t < n_tracks; ++t) {
+            weight_t tau2;
+            const std::string &text = tau2s[tau2s.size() == 1 ? 0 : t];
+            if (!s2d(text, &tau2) || !(tau2 > 0.0 && tau2 < 1.0)) {
+                *error = "row-sweep tau2 must lie strictly in (0, 1): " + text;
+                return params;
+            }
+            params.tau2.push_back(tau2);
+        }
+    }
+    params.score_out = rowsweep_score_out;
+    params.seed = rowsweep_seed;
+    if (rowsweep_row_mode_spec == "fixed" || rowsweep_row_mode_spec.empty()) {
+        params.row_mode = RowSweepRowMode::Fixed;
+    } else if (rowsweep_row_mode_spec == "random") {
+        params.row_mode = RowSweepRowMode::Random;
+    } else if (rowsweep_row_mode_spec == "pooled") {
+        params.row_mode = RowSweepRowMode::Pooled;
+    } else {
+        *error = "--rowsweep-row-mode must be fixed, random or pooled: "
+                 + rowsweep_row_mode_spec;
+        return params;
+    }
     return params;
 }
 #endif  // ENABLE_TOB
@@ -370,6 +424,55 @@ long long Instance::solve() {
                 } else {
                     delete row_sweep_tree;
                 }
+            } else if (branch_cut_blob) {
+                BranchCutParams branch_cut;
+                branch_cut.min_support = branch_cut_min_support;
+                branch_cut.resolution_z = branch_cut_resolution_z;
+                branch_cut.resolution_margin = branch_cut_resolution_margin;
+                branch_cut.propagate_tau = branch_cut_propagate_tau;
+                branch_cut.cycles = branch_cut_cycles;
+                branch_cut.samples = branch_cut_samples;
+                branch_cut.query_alpha = rowsweep_query_alpha;
+                branch_cut.seed = branch_cut_seed;
+                std::string bc_error;
+                branch_cut.oracle = OracleSpec::parse(oracle_spec,
+                                                      rowsweep_query_alpha,
+                                                      oracle_cf_max,
+                                                      oracle_margin, &bc_error);
+                if (!bc_error.empty()) {
+                    std::cout << "\nERROR: " << bc_error << std::endl;
+                    exit(1);
+                }
+                {
+                    std::vector<std::string> texts = split_csv(branch_cut_tau_spec);
+                    const std::size_t n_tracks = branch_cut.oracle.tracks.size();
+                    if (texts.size() != 1 && texts.size() != n_tracks) {
+                        std::cout << "\nERROR: --branchcut-tau needs one value "
+                                  << "or one per oracle track" << std::endl;
+                        exit(1);
+                    }
+                    for (std::size_t t = 0; t < n_tracks; ++t) {
+                        weight_t tau;
+                        const std::string &text = texts[texts.size() == 1 ? 0 : t];
+                        if (!s2d(text, &tau) || !(tau > 0.0 && tau < 1.0)) {
+                            std::cout << "\nERROR: branch-cut tau must lie in "
+                                      << "(0, 1): " << text << std::endl;
+                            exit(1);
+                        }
+                        branch_cut.tau.push_back(tau);
+                    }
+                }
+                SpeciesTree* branch_cut_tree = new SpeciesTree(
+                    input, dict, output, branch_cut
+                );
+                std::cout << "Printing output tree with pvalues:" << std::endl;
+                std::cout << output->to_string_pvalue() << std::endl;
+                if (!store_pvalue && blob) {
+                    delete output;
+                    output = branch_cut_tree;
+                } else {
+                    delete branch_cut_tree;
+                }
             } else if (corner_row_blob) {
                 CornerRowParams corner_row;
                 corner_row.k = corner_row_k;
@@ -437,6 +540,8 @@ long long Instance::solve() {
                 }
                 corner_row.seed = corner_row_seed;
                 corner_row.cross = corner_row_cross;
+                corner_row.resolution_margin = corner_row_resolution_margin;
+                corner_row.resolution_samples = corner_row_resolution_samples;
                 SpeciesTree* corner_row_tree = new SpeciesTree(
                     input, dict, output, corner_row
                 );
@@ -467,7 +572,7 @@ long long Instance::solve() {
     }
 
     #if ENABLE_TOB
-    if (!load_pvalue && !store_pvalue && blob && !row_sweep_blob && !corner_row_blob) {
+    if (!load_pvalue && !store_pvalue && blob && !row_sweep_blob && !corner_row_blob && !branch_cut_blob) {
         SpeciesTree* tmp = new SpeciesTree(output, dict, alpha, beta, enable_split_test);
         delete output;
         output = tmp;
@@ -708,6 +813,24 @@ int Instance::parse(int argc, char **argv) {
                 return 2;
             }
         }
+        else if (opt == "--rowsweep-tau2") {
+            if (i < argc - 1) {
+                rowsweep_tau2_spec = argv[++ i];
+            }
+            else {
+                std::cout << "\nERROR: No tau specified" << std::endl;
+                return 2;
+            }
+        }
+        else if (opt == "--rowsweep-score-out") {
+            if (i < argc - 1) {
+                rowsweep_score_out = argv[++ i];
+            }
+            else {
+                std::cout << "\nERROR: No score output file specified" << std::endl;
+                return 2;
+            }
+        }
         else if (opt == "--rowsweep-heavy") {
             if (i < argc - 1) {
                 rowsweep_heavy_spec = argv[++ i];
@@ -731,6 +854,47 @@ int Instance::parse(int argc, char **argv) {
         }
         else if (opt == "--cornerrow-blob") {
             corner_row_blob = true;
+        }
+        else if (opt == "--branchcut-blob") {
+            branch_cut_blob = true;
+        }
+        else if (opt == "--branchcut-tau") {
+            if (i < argc - 1) {
+                branch_cut_tau_spec = argv[++ i];
+            } else {
+                std::cout << "\nERROR: --branchcut-tau needs a value" << std::endl;
+                return 2;
+            }
+        }
+        else if (opt == "--branchcut-resolution-margin") {
+            if (i >= argc - 1 || !s2d(argv[++ i], &branch_cut_resolution_margin)) {
+                std::cout << "\nERROR: --branchcut-resolution-margin needs a value" << std::endl;
+                return 2;
+            }
+        }
+        else if (opt == "--branchcut-resolution-z") {
+            if (i >= argc - 1 || !s2d(argv[++ i], &branch_cut_resolution_z)) {
+                std::cout << "\nERROR: --branchcut-resolution-z needs a value" << std::endl;
+                return 2;
+            }
+        }
+        else if (opt == "--branchcut-min-support") {
+            if (i >= argc - 1 || !s2ul(argv[++ i], &branch_cut_min_support)) {
+                std::cout << "\nERROR: --branchcut-min-support needs an integer" << std::endl;
+                return 2;
+            }
+        }
+        else if (opt == "--branchcut-samples") {
+            if (i >= argc - 1 || !s2ul(argv[++ i], &branch_cut_samples)) {
+                std::cout << "\nERROR: --branchcut-samples needs an integer" << std::endl;
+                return 2;
+            }
+        }
+        else if (opt == "--branchcut-seed") {
+            if (i >= argc - 1 || !s2ul(argv[++ i], &branch_cut_seed)) {
+                std::cout << "\nERROR: --branchcut-seed needs an integer" << std::endl;
+                return 2;
+            }
         }
         else if (opt == "--quard") {
             quard = true;
@@ -1067,8 +1231,59 @@ int Instance::parse(int argc, char **argv) {
                 return 2;
             }
         }
+        else if (opt == "--rowsweep-row-mode") {
+            if (i < argc - 1) {
+                rowsweep_row_mode_spec = argv[++ i];
+            }
+            else {
+                std::cout << "\nERROR: No row-sweep row mode specified" << std::endl;
+                return 2;
+            }
+        }
+        else if (opt == "--rowsweep-seed") {
+            std::string param = "";
+            if (i < argc - 1) param = argv[++ i];
+            if (! s2ul(param, &rowsweep_seed)) {
+                std::cout << "\nERROR: invalid parameter: " << param << std::endl;
+                return 2;
+            }
+        }
         else if (opt == "--corner-cross") {
             corner_row_cross = true;
+        }
+        else if (opt == "--branchcut-cycles") {
+            if (i + 1 < argc) {
+                if (!s2ul(argv[++ i], &branch_cut_cycles)) {
+                    std::cout << "\nERROR: invalid --branchcut-cycles" << std::endl;
+                    return 1;
+                }
+            } else { std::cout << "\nERROR: --branchcut-cycles needs a value" << std::endl; return 1; }
+        }
+        else if (opt == "--branchcut-propagate-tau") {
+            if (i + 1 < argc) {
+                if (!s2d(argv[++ i], &branch_cut_propagate_tau)
+                    || branch_cut_propagate_tau < 0.0
+                    || branch_cut_propagate_tau >= 1.0) {
+                    std::cout << "\nERROR: --branchcut-propagate-tau must lie in [0, 1)" << std::endl;
+                    return 1;
+                }
+            } else { std::cout << "\nERROR: --branchcut-propagate-tau needs a value" << std::endl; return 1; }
+        }
+        else if (opt == "--cornerrow-resolution-margin") {
+            if (i + 1 < argc) {
+                if (!s2d(argv[++ i], &corner_row_resolution_margin)) {
+                    std::cout << "\nERROR: invalid --cornerrow-resolution-margin" << std::endl;
+                    return 1;
+                }
+            } else { std::cout << "\nERROR: --cornerrow-resolution-margin needs a value" << std::endl; return 1; }
+        }
+        else if (opt == "--resolution-samples") {
+            if (i + 1 < argc) {
+                if (!s2ul(argv[++ i], &corner_row_resolution_samples)) {
+                    std::cout << "\nERROR: invalid --resolution-samples" << std::endl;
+                    return 1;
+                }
+            } else { std::cout << "\nERROR: --resolution-samples needs a value" << std::endl; return 1; }
         }
         else if (opt == "--corner-seed") {
             std::string param = "";
@@ -1116,6 +1331,14 @@ int Instance::parse(int argc, char **argv) {
     if (corner_row_blob && row_sweep_blob) {
         std::cout << "\nERROR: --cornerrow-blob cannot be combined with "
                   << "--rowsweep-blob" << std::endl;
+        return 2;
+    }
+
+    if (branch_cut_blob && (row_sweep_blob || corner_row_blob
+                            || three_fix_one_alter || two_fix_two_alter || quard)) {
+        std::cout << "\nERROR: --branchcut-blob cannot be combined with "
+                  << "--rowsweep-blob, --cornerrow-blob, --3f1a, --2f2a "
+                  << "or --quard" << std::endl;
         return 2;
     }
 

@@ -1893,7 +1893,7 @@ OracleSpec OracleSpec::parse(const std::string &text, weight_t query_alpha,
         const std::size_t bar = text.find('|', pos);
         const std::string track_text =
             text.substr(pos, bar == std::string::npos ? std::string::npos : bar - pos);
-        OracleTerm term = {false, false, false, false};
+        OracleTerm term = {false, false, false, false, false};
         std::size_t tpos = 0;
         while (tpos <= track_text.size()) {
             const std::size_t plus = track_text.find('+', tpos);
@@ -1906,6 +1906,7 @@ OracleSpec OracleSpec::parse(const std::string &text, weight_t query_alpha,
             else if (name == "t3") term.use_t3 = true;
             else if (name == "cf") term.use_cf = true;
             else if (name == "maj") term.use_majority = true;
+            else if (name == "sym") term.use_sym = true;
             else if (!name.empty()) {
                 if (error) *error = "unknown oracle test: " + name;
                 return spec;
@@ -1913,9 +1914,9 @@ OracleSpec OracleSpec::parse(const std::string &text, weight_t query_alpha,
             if (plus == std::string::npos) break;
             tpos = plus + 1;
         }
-        if (!term.use_t1 && !term.use_t3 && !term.use_majority) {
+        if (!term.use_t1 && !term.use_t3 && !term.use_majority && !term.use_sym) {
             // "cf" alone is a guard, not a test; it can only narrow something.
-            if (error) *error = "each oracle track needs t1, t3 or maj";
+            if (error) *error = "each oracle track needs t1, t3, sym or maj";
             return spec;
         }
         spec.tracks.push_back(term);
@@ -1933,6 +1934,7 @@ std::string OracleSpec::to_string() const {
         std::string term;
         if (tracks[i].use_t1) term += "t1";
         if (tracks[i].use_t3) term += term.empty() ? "t3" : "+t3";
+        if (tracks[i].use_sym) term += term.empty() ? "sym" : "+sym";
         if (tracks[i].use_cf) term += term.empty() ? "cf" : "+cf";
         if (tracks[i].use_majority) term += term.empty() ? "maj" : "+maj";
         out += term;
@@ -1988,12 +1990,32 @@ bool SpeciesTree::query_pairs_together(std::vector<Tree *> &input, index_t x,
     if (term.use_majority) {
         const weight_t best = std::max(qcfs[0], std::max(qcfs[1], qcfs[2]));
         if (!((best - qcfs[target]) / total > oracle.margin)) return true;
-        if (!term.use_t1) return false;
+        if (!term.use_t1 && !term.use_t3 && !term.use_sym) return false;
     }
 
     // A strongly concordant quartet cannot be evidence against the split, no
     // matter how significant its minor asymmetry is.
     if (term.use_cf && qcfs[target] / total >= oracle.cf_max) return true;
+
+    if (term.use_sym) {
+        // Exchangeability of the two minors is implied by "e is a cut edge"
+        // on its own -- the near-side lineages that fail to coalesce cross e
+        // as an interchangeable pair -- so asymmetry between them is evidence
+        // against the split, and it is the reticulation signature itself.
+        // Chi-square with 1 df, whose survival function is erfc(sqrt(x/2));
+        // closed form, so this track never calls into R.
+        const weight_t m1 = qcfs[(target + 1) % 3];
+        const weight_t m2 = qcfs[(target + 2) % 3];
+        const weight_t minor_total = m1 + m2;
+        bool asymmetric = false;
+        if (minor_total > 0) {
+            const double d = (double) (m1 - m2);
+            const double chi = d * d / (double) minor_total;
+            asymmetric = std::erfc(std::sqrt(chi / 2.0)) < oracle.query_alpha;
+        }
+        if (!asymmetric) return true;                  // symmetric: agrees
+        if (!term.use_t1 && !term.use_t3) return false;
+    }
 
     if (term.use_t3) {
         // T3 sorts the counts internally, so its p-value depends only on the
@@ -2005,7 +2027,7 @@ bool SpeciesTree::query_pairs_together(std::vector<Tree *> &input, index_t x,
                 quartet, (weight_t) pvalue(counts)).first;
         }
         if (t3_it->second >= oracle.query_alpha) return true;   // a tree does fit
-        if (!term.use_t1) return false;
+        if (!term.use_t1 && !term.use_sym) return false;
     }
 
     if (!term.use_t1) return true;
@@ -2078,6 +2100,69 @@ bool SpeciesTree::row_sweep_test_idx(std::vector<Tree *> &input,
     if (s < 2 || m < 2) return true;   // not testable -> ACCEPT (trivial split)
 
     const std::size_t n_tracks = params.oracle.tracks.size();
+
+    // Random/Pooled give every partner column its own anchor, so that a single
+    // anomalous taxon pair no longer contaminates every row of the edge. The
+    // published rule (Fixed) conditions every row on the one pair (R[0], r).
+    if (params.row_mode != RowSweepRowMode::Fixed) {
+        // Deterministic per edge: the same bipartition always draws the same
+        // anchors, so a run is reproducible from the seed alone.
+        std::uint64_t h = params.seed;
+        for (index_t v : S) h = h * 1000003u + (std::uint64_t) v + 1u;
+        for (index_t v : R) h = h * 1000003u + (std::uint64_t) v + 1u;
+        std::mt19937_64 rng(h);
+
+        // One column per partner r in R, each with an anchor drawn from R\{r}.
+        std::vector<index_t> rho_of(m);
+        for (std::size_t j = 0; j < m; ++j) {
+            std::size_t a = (std::size_t) (rng() % (m - 1));
+            if (a >= j) a++;                       // skip r itself
+            rho_of[j] = R[a];
+        }
+
+        for (std::size_t t = 0; t < n_tracks; ++t) {
+            const double tau = (double) params.tau[t];
+            const unsigned long int heavy =
+                params.heavy[t] == 0 ? 1 : params.heavy[t];
+
+            std::vector<std::vector<std::size_t>> c(s, std::vector<std::size_t>(m, 0));
+            for (std::size_t xi = 0; xi < s; xi++) {
+                for (std::size_t yi = xi + 1; yi < s; yi++) {
+                    for (std::size_t j = 0; j < m; j++) {
+                        if (!query_pairs_together(input, S[xi], S[yi], rho_of[j],
+                                                  R[j], params.oracle, t)) {
+                            c[xi][j]++;
+                            c[yi][j]++;
+                        }
+                    }
+                }
+            }
+
+            if (params.row_mode == RowSweepRowMode::Pooled) {
+                // One row per x over every column: a single bad pair now
+                // contributes at most 1/m of the statistic instead of all of it.
+                for (std::size_t xi = 0; xi < s; xi++) {
+                    std::size_t total = 0;
+                    for (std::size_t j = 0; j < m; j++) total += c[xi][j];
+                    if ((double) total / (double) ((s - 1) * m) > tau) return false;
+                }
+            } else {
+                std::size_t corroborating = 0;
+                for (std::size_t j = 0; j < m; j++) {
+                    for (std::size_t xi = 0; xi < s; xi++) {
+                        if ((double) c[xi][j] / (double) (s - 1) > tau) {
+                            corroborating++;
+                            break;
+                        }
+                    }
+                }
+                const std::size_t needed = std::min((std::size_t) heavy, m);
+                if (corroborating >= needed && corroborating > 0) return false;
+            }
+        }
+        return true;
+    }
+
     const std::vector<std::size_t> anchors = row_sweep_anchors(m, params.anchors);
 
     for (std::size_t ai = 0; ai < anchors.size(); ++ai) {
@@ -2129,6 +2214,68 @@ bool SpeciesTree::row_sweep_test_idx(std::vector<Tree *> &input,
         }
     }
     return true;                                                             // ACCEPT
+}
+
+// The continuous statistic behind row_sweep_test_idx, for the Fixed row mode.
+//
+// The rule rejects when `corroborating >= heavy`, where a partner corroborates
+// when at least one of its rows exceeds tau. Writing v_r for a partner's
+// largest row fraction and v_(k) for the k-th largest of those,
+//
+//     #{r : v_r > tau} >= k   <=>   v_(k) > tau,
+//
+// so the heavy-th largest partner maximum *is* the quantity the rule compares
+// against tau, and taking the max over anchors reproduces the OR across them.
+// Returning it lets a second stage re-examine an edge at a different threshold
+// without recomputing anything: every 4-set it needs is already cached.
+std::vector<weight_t> SpeciesTree::row_sweep_scores_idx(
+        std::vector<Tree *> &input, const std::vector<index_t> &A,
+        const std::vector<index_t> &B, const RowSweepParams &params) {
+    const std::vector<index_t> &S = (A.size() >= B.size()) ? A : B;
+    const std::vector<index_t> &R = (A.size() >= B.size()) ? B : A;
+    const std::size_t s = S.size();
+    const std::size_t m = R.size();
+    const std::size_t n_tracks = params.oracle.tracks.size();
+    std::vector<weight_t> score(n_tracks, (weight_t) 0);
+    if (s < 2 || m < 2 || params.row_mode != RowSweepRowMode::Fixed)
+        return std::vector<weight_t>();
+
+    const std::vector<std::size_t> anchors = row_sweep_anchors(m, params.anchors);
+    for (std::size_t ai = 0; ai < anchors.size(); ++ai) {
+        const index_t rho = R[anchors[ai]];
+        std::vector<index_t> rest;
+        rest.reserve(m - 1);
+        for (std::size_t j = 0; j < m; ++j)
+            if (j != anchors[ai]) rest.push_back(R[j]);
+        const std::size_t r_free = rest.size();
+
+        for (std::size_t t = 0; t < n_tracks; ++t) {
+            const unsigned long int heavy =
+                params.heavy[t] == 0 ? 1 : params.heavy[t];
+            std::vector<std::vector<std::size_t>> c(s, std::vector<std::size_t>(r_free, 0));
+            for (std::size_t xi = 0; xi < s; xi++)
+                for (std::size_t yi = xi + 1; yi < s; yi++)
+                    for (std::size_t ri = 0; ri < r_free; ri++)
+                        if (!query_pairs_together(input, S[xi], S[yi], rho,
+                                                  rest[ri], params.oracle, t)) {
+                            c[xi][ri]++;
+                            c[yi][ri]++;
+                        }
+
+            std::vector<double> per_partner(r_free, 0.0);
+            for (std::size_t ri = 0; ri < r_free; ri++) {
+                double best = 0.0;
+                for (std::size_t xi = 0; xi < s; xi++)
+                    best = std::max(best, (double) c[xi][ri] / (double) (s - 1));
+                per_partner[ri] = best;
+            }
+            std::sort(per_partner.begin(), per_partner.end(), std::greater<double>());
+            const std::size_t k = std::min((std::size_t) heavy, r_free);
+            if (k >= 1 && (weight_t) per_partner[k - 1] > score[t])
+                score[t] = (weight_t) per_partner[k - 1];
+        }
+    }
+    return score;
 }
 
 // Annotate every edge in a binary refinement with the row-sweep decision and
@@ -2193,6 +2340,93 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
         for (std::size_t j = 0; j < 4; ++j)
             edge->minimizer[j] = witness[std::min(j, witness.size() - 1)];
 
+    }
+
+    // Optional: record the continuous statistic for every testable edge, so a
+    // whole tau curve can be swept offline from a single run instead of one run
+    // per threshold. Costs no queries -- every 4-set is already cached -- and
+    // runs after all decisions are made, so it cannot affect them.
+    if (!row_sweep.score_out.empty()) {
+        std::ofstream fout(row_sweep.score_out);
+        if (fout.fail()) {
+            std::cout << "\nERROR: Unable to write to " << row_sweep.score_out
+                      << std::endl;
+            exit(1);
+        }
+        fout << "edge_id\tisfake\trejected\tscores\tside\n";
+        for (std::size_t i = 0; i < internal.size(); ++i) {
+            Node *edge = internal[i];
+            std::vector<index_t> A, B;
+            for (Node *leaf : bips[i].first) A.push_back(leaf->index);
+            for (Node *leaf : bips[i].second) B.push_back(leaf->index);
+            std::vector<weight_t> score;
+            if (!edge->isfake) score = row_sweep_scores_idx(input, A, B, row_sweep);
+            fout << i << "\t" << (edge->isfake ? 1 : 0) << "\t"
+                 << (false_positive.count(edge) ? 1 : 0) << "\t";
+            for (std::size_t t = 0; t < score.size(); ++t)
+                fout << (t ? "," : "") << score[t];
+            if (score.empty()) fout << "NA";
+            fout << "\t";
+            const std::vector<index_t> &side = (A.size() <= B.size()) ? A : B;
+            for (std::size_t j = 0; j < side.size(); ++j)
+                fout << (j ? "," : "") << dict->index2label(side[j]);
+            fout << "\n";
+        }
+        fout.close();
+        std::cout << "Wrote per-edge row-sweep scores to " << row_sweep.score_out
+                  << std::endl;
+    }
+
+    // Second stage: re-examine, at a looser threshold, only the edges adjacent
+    // to one the first stage rejected. Blob-internal edges of T' form connected
+    // subtrees (a degree-k blob contributes k-3 of them), so that neighbourhood
+    // is enriched ~4x for them relative to true edges, which is what pays for
+    // the looser bar. Every 4-set is already cached, so this costs no queries.
+    bool two_stage = false;
+    for (std::size_t t = 0; t < row_sweep.tau2.size() && t < row_sweep.tau.size(); ++t)
+        if (row_sweep.tau2[t] < row_sweep.tau[t]) two_stage = true;
+    if (two_stage && row_sweep.row_mode == RowSweepRowMode::Fixed) {
+        std::unordered_set<Node *> stage1 = false_positive;
+        std::size_t promoted = 0, considered = 0;
+        for (std::size_t i = 0; i < internal.size(); ++i) {
+            Node *edge = internal[i];
+            if (edge->isfake || stage1.count(edge)) continue;
+            // Neighbours share an endpoint: the parent, the two children, and
+            // the sibling. Only internal edges of the refinement are tested.
+            bool near = false;
+            if (edge->parent != NULL && stage1.count(edge->parent)) near = true;
+            for (Node *c : edge->children)
+                if (stage1.count(c)) near = true;
+            if (edge->parent != NULL)
+                for (Node *c : edge->parent->children)
+                    if (c != edge && stage1.count(c)) near = true;
+            if (!near) continue;
+            ++considered;
+
+            std::vector<index_t> A, B;
+            for (Node *leaf : bips[i].first) A.push_back(leaf->index);
+            for (Node *leaf : bips[i].second) B.push_back(leaf->index);
+            std::vector<weight_t> score =
+                row_sweep_scores_idx(input, A, B, row_sweep);
+            for (std::size_t t = 0; t < score.size(); ++t) {
+                const weight_t tau2 = t < row_sweep.tau2.size()
+                    ? row_sweep.tau2[t] : row_sweep.tau[t];
+                if (score[t] > tau2) {
+                    if (!false_positive.count(edge)) {
+                        false_positive.insert(edge);
+                        edge->min_pvalue = 0.0;
+                        ++promoted;
+                        std::cout << "Stage 2 REJECT branch id " << i
+                                  << " (score " << score[t] << " > tau2 "
+                                  << tau2 << ")" << std::endl;
+                    }
+                    break;
+                }
+            }
+        }
+        std::cout << "Stage 2 examined " << considered << " branches next to a"
+                  << " stage-1 rejection and rejected " << promoted
+                  << " of them" << std::endl;
     }
 
     if (display->root->children.size() == 2)
@@ -2291,6 +2525,482 @@ static void corner_row_sample_indices(std::uint64_t population,
     }
 }
 
+// The cached qCF triple of a 4-set, computing it if this is the first request.
+// Shares row_sweep_qcfs_cache with query_pairs_together, so a 4-set already
+// queried as a contradiction test costs nothing here.
+bool SpeciesTree::quartet_counts(std::vector<Tree *> &input, index_t a,
+                                 index_t b, index_t c, index_t d,
+                                 weight_t out[3]) {
+    index_t sorted[4] = {a, b, c, d};
+    std::sort(sorted, sorted + 4);
+    for (int i = 1; i < 4; ++i) if (sorted[i - 1] == sorted[i]) return false;
+    const quartet_t quartet = join(sorted);
+    auto it = row_sweep_qcfs_cache.find(quartet);
+    if (it == row_sweep_qcfs_cache.end()) {
+        weight_t counts[3] = {0, 0, 0};
+        get_qCFs(input, sorted, counts);
+        it = row_sweep_qcfs_cache.emplace(
+            quartet, std::array<weight_t, 3>{counts[0], counts[1], counts[2]}).first;
+    }
+    for (int i = 0; i < 3; ++i) out[i] = it->second[i];
+    return out[0] + out[1] + out[2] > 0;
+}
+
+// Pooled cross-corner resolution score. Extracted verbatim from the branch-cut
+// constructor so that corner row and the row sweep can use it too: it tests
+// whether T' picked the locally best of the three corner pairings, which is the
+// ASTRAL-error half of N, and is independent of the cluster certificate that
+// finds blobs. Every 4-set goes through quartet_counts, so it shares the qCF
+// cache with the oracle and costs no R call.
+bool SpeciesTree::corner_resolution_score(std::vector<Tree *> &input,
+                                          const std::vector<index_t> *corners,
+                                          unsigned long int samples,
+                                          std::mt19937_64 &rng,
+                                          double *margin, double *z,
+                                          std::size_t *pooled) {
+    if (corners[0].empty() || corners[1].empty()
+        || corners[2].empty() || corners[3].empty()) return false;
+
+    double w[3] = {0.0, 0.0, 0.0};
+    const std::uint64_t pop =
+        (std::uint64_t) corners[0].size() * corners[1].size()
+        * corners[2].size() * corners[3].size();
+    std::size_t want = (std::size_t) pop;
+    if (samples > 0) {
+        // A multiple of the corner-size SUM, not of one side: the population is
+        // a fourfold product, so a per-side budget would grow cubically.
+        const std::uint64_t budget = (std::uint64_t) samples
+            * (std::uint64_t) (corners[0].size() + corners[1].size()
+                               + corners[2].size() + corners[3].size());
+        if (budget < pop) want = (std::size_t) budget;
+    }
+    std::vector<std::uint64_t> picks;
+    corner_row_sample_indices(pop, want, rng, picks);
+    std::size_t used = 0;
+    for (std::uint64_t code : picks) {
+        const index_t d0 = corners[3][code % corners[3].size()];
+        code /= corners[3].size();
+        const index_t c0 = corners[2][code % corners[2].size()];
+        code /= corners[2].size();
+        const index_t b0 = corners[1][code % corners[1].size()];
+        code /= corners[1].size();
+        const index_t a0 = corners[0][code % corners[0].size()];
+        weight_t counts[3];
+        if (!quartet_counts(input, a0, b0, c0, d0, counts)) continue;
+        index_t sorted4[4] = {a0, b0, c0, d0};
+        std::sort(sorted4, sorted4 + 4);
+        const int t0 = topology_for_pair(sorted4, a0, b0);
+        const int t1 = topology_for_pair(sorted4, a0, c0);
+        const int t2 = topology_for_pair(sorted4, a0, d0);
+        if (t0 < 0 || t1 < 0 || t2 < 0) continue;
+        w[0] += counts[t0];
+        w[1] += counts[t1];
+        w[2] += counts[t2];
+        ++used;
+    }
+    const double wbest = std::max(w[1], w[2]);
+    const double wsum = w[0] + w[1] + w[2];
+    if (wsum <= 0) return false;
+    if (z) *z = (w[0] - wbest) / std::sqrt(std::max(w[0] + wbest, 1.0));
+    if (margin) *margin = (w[0] - wbest) / wsum;
+    if (pooled) *pooled = used;
+    return true;
+}
+
+// Every edge-induced cluster of T', as leaf-index bitmasks. Removing an edge of
+// T' splits its leaves in two, and both sides are clusters; the branch-cut
+// certificate is one particular cluster (the reticulation branch), so the
+// algorithm has to be able to name all of them.
+void SpeciesTree::branch_cut_clusters(Node *root, std::size_t nwords,
+                                      std::vector<std::vector<std::uint64_t>> &out,
+                                      std::vector<std::uint64_t> &universe) {
+    std::vector<std::vector<std::uint64_t>> below;
+    // Post-order: a node's leaf set is the union of its children's.
+    std::vector<Node *> stack{root}, order;
+    while (!stack.empty()) {
+        Node *v = stack.back();
+        stack.pop_back();
+        order.push_back(v);
+        for (Node *c : v->children) stack.push_back(c);
+    }
+    std::unordered_map<Node *, std::size_t> slot;
+    below.assign(order.size(), std::vector<std::uint64_t>(nwords, 0));
+    for (std::size_t i = 0; i < order.size(); ++i) slot[order[i]] = i;
+    for (std::size_t i = order.size(); i-- > 0;) {
+        Node *v = order[i];
+        if (v->children.empty()) {
+            below[i][v->index >> 6] |= (std::uint64_t) 1 << (v->index & 63);
+        } else {
+            for (Node *c : v->children) {
+                const std::vector<std::uint64_t> &cb = below[slot[c]];
+                for (std::size_t w = 0; w < nwords; ++w) below[i][w] |= cb[w];
+            }
+        }
+    }
+    universe = below[slot[root]];
+    out.clear();
+    for (std::size_t i = 0; i < order.size(); ++i) {
+        if (order[i] == root) continue;
+        out.push_back(below[i]);
+        std::vector<std::uint64_t> comp(nwords);
+        for (std::size_t w = 0; w < nwords; ++w) comp[w] = universe[w] & ~below[i][w];
+        out.push_back(comp);
+    }
+}
+
+static inline bool bits_subset(const std::vector<std::uint64_t> &sub,
+                               const std::vector<std::uint64_t> &sup) {
+    for (std::size_t w = 0; w < sub.size(); ++w)
+        if (sub[w] & ~sup[w]) return false;
+    return true;
+}
+
+static inline bool bits_equal(const std::vector<std::uint64_t> &a,
+                              const std::vector<std::uint64_t> &b) {
+    for (std::size_t w = 0; w < a.size(); ++w) if (a[w] != b[w]) return false;
+    return true;
+}
+
+static inline bool bits_any(const std::vector<std::uint64_t> &a) {
+    for (std::uint64_t w : a) if (w) return true;
+    return false;
+}
+
+static inline bool bits_test(const std::vector<std::uint64_t> &a, index_t i) {
+    return (a[i >> 6] >> (i & 63)) & 1;
+}
+
+// BranchCutContraction (Algorithm "branch-cut-contraction"): contract the
+// refinement-only edges of T' using fully bad cut certificates.
+//
+// For each internal edge e with corners A_1, A_2 | B_1, B_2, sample coordinates
+// from Xi_A(e) = C(A,2) x B_1 x B_2 and Xi_B(e) = C(B,2) x A_1 x A_2, then scan
+// every edge-induced cluster U of T' inside A (resp. B). A coordinate *crosses*
+// U when exactly one member of its near-side pair lies in U. If e is
+// refinement-only and U is the reticulation branch at the blob vertex, every
+// crossing coordinate is a perfect contradiction; if e is retained, no
+// coordinate contradicts except through oracle error.
+//
+// See BranchCutParams for the two departures from the algorithm as published
+// (a tunable tau below 1/2, and a minimum-support guard), and why the recorded
+// evidence requires them.
+SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
+                         SpeciesTree *display,
+                         const BranchCutParams &branch_cut) {
+    std::cout << "Constructing tree of blobs using branch-cut contraction"
+              << " (oracle " << branch_cut.oracle.to_string()
+              << ", tau ";
+    for (std::size_t t = 0; t < branch_cut.tau.size(); ++t)
+        std::cout << (t ? "," : "") << branch_cut.tau[t];
+    std::cout << ", min support " << branch_cut.min_support << ")" << std::endl;
+
+    add_r_libpaths_and_load(RINS);
+    for (Tree *t : input) t->LCA_preprocessing();
+
+    this->dict = display->dict;
+    display->refine();
+
+    std::vector<Node *> internal;
+    std::vector<std::pair<std::vector<Node *>, std::vector<Node *>>> bips;
+    display->get_bipartitions(&internal, &bips);
+    std::cout << internal.size() << " branches to test" << std::endl;
+
+    const std::size_t ntaxa = (std::size_t) display->dict->size();
+    const std::size_t nwords = (ntaxa + 63) / 64;
+    std::vector<std::vector<std::uint64_t>> clusters;
+    std::vector<std::uint64_t> universe;
+    display->branch_cut_clusters(display->root, nwords, clusters, universe);
+
+    std::mt19937_64 rng(branch_cut.seed);
+    std::unordered_set<Node *> false_positive;
+
+    // Seed-and-propagate (theory.tex Alg. seed-and-propagate). The screening
+    // rule below scores an edge by the MAXIMUM over ~2n clusters, so its null
+    // is inflated by that maximisation -- measured on n15+n25, the 99th
+    // percentile of the statistic on retained edges is 0.080 for the max but
+    // only 0.0030 for a single fixed cluster, a 27x tighter tail. Lem.
+    // propagation says why: for a retained edge Phi(f, L) is null for ANY L
+    // properly inside one side, so once L is known no maximisation is needed.
+    //
+    // So: phase 1 screens at `tau` and remembers the cluster that fired, phase 2
+    // re-tests every surviving edge against those seeds at the much lower
+    // `propagate_tau`. Since the seed rate never exceeds the max, phase 2 can
+    // only fire where propagate_tau < rate <= tau, making it a strict addition
+    // to the screening rule rather than a retuning of it.
+    const bool propagate = branch_cut.propagate_tau != 0.0;
+    struct EdgeEvidence {
+        std::vector<std::pair<index_t, index_t>> pairs;
+        std::vector<char> bad;
+        std::vector<std::uint64_t> nearmask;
+    };
+    std::vector<std::vector<EdgeEvidence>> evidence(propagate ? internal.size() : 0);
+    std::vector<int> seed_of(propagate ? internal.size() : 0, -1);
+    std::vector<char> screened(propagate ? internal.size() : 0, 0);
+
+    for (std::size_t i = 0; i < internal.size(); ++i) {
+        Node *edge = internal[i];
+        edge->blob_id = i;
+        std::cout << "Testing branch id " << i << ", ";
+
+        if (edge->isfake) {
+            std::cout << "fake ***" << std::endl;
+            false_positive.insert(edge);
+            edge->min_pvalue = 0.0;
+            edge->max_pvalue = 0.0;
+            edge->min_f[0] = edge->min_f[1] = edge->min_f[2] = 0.0;
+            edge->split_match_count = edge->split_mismatch_count = 0;
+            for (std::size_t j = 0; j < 4; ++j) edge->minimizer[j] = 0;
+            continue;
+        }
+
+        std::vector<index_t> corners[4];
+        bool reject = false;
+        weight_t worst = 0.0;
+        const std::size_t n_tracks = branch_cut.oracle.tracks.size();
+        if (display->corner_sets_for_edge(display, edge, corners)) {
+          for (std::size_t track = 0; track < n_tracks && (!reject || propagate); ++track) {
+            const double tau_t = (double) branch_cut.tau[
+                track < branch_cut.tau.size() ? track : 0];
+            // Two symmetric sides: pairs from `near`, anchors one per far corner.
+            for (int side = 0; side < 2 && (!reject || propagate); ++side) {
+                std::vector<index_t> near;
+                const std::vector<index_t> &f1 = corners[side == 0 ? 2 : 0];
+                const std::vector<index_t> &f2 = corners[side == 0 ? 3 : 1];
+                near.insert(near.end(), corners[side == 0 ? 0 : 2].begin(),
+                            corners[side == 0 ? 0 : 2].end());
+                near.insert(near.end(), corners[side == 0 ? 1 : 3].begin(),
+                            corners[side == 0 ? 1 : 3].end());
+                const std::size_t m = near.size();
+                if (m < 2 || f1.empty() || f2.empty()) continue;
+
+                std::vector<std::uint64_t> nearmask(nwords, 0);
+                for (index_t t : near)
+                    nearmask[t >> 6] |= (std::uint64_t) 1 << (t & 63);
+
+                const std::uint64_t npairs = (std::uint64_t) m * (m - 1) / 2;
+                const std::uint64_t population =
+                    npairs * (std::uint64_t) f1.size() * (std::uint64_t) f2.size();
+                std::size_t want = (std::size_t) population;
+                if (branch_cut.samples > 0) {
+                    const std::uint64_t budget =
+                        (std::uint64_t) branch_cut.samples * (std::uint64_t) m;
+                    if (budget < population) want = (std::size_t) budget;
+                }
+                std::vector<std::pair<index_t, index_t>> pairs;
+                std::vector<char> bad;
+
+                if (branch_cut.cycles > 0) {
+                    // Lem. cycle-cover: h edge-disjoint spanning cycles, one per
+                    // anchor pair. A spanning cycle crosses every nonempty
+                    // proper subset at least twice, so M_U >= 2h for EVERY
+                    // cluster -- the depth the theorem's proof requires, which
+                    // random sampling does not give.
+                    const std::uint64_t t_A =
+                        (std::uint64_t) f1.size() * (std::uint64_t) f2.size();
+                    std::size_t h = (std::size_t) branch_cut.cycles;
+                    // Availability (Lem. cycle-cover): h <= t*floor((r-1)/2),
+                    // and for r == 2 a spanning 2-cycle needs 2h <= t. Taking
+                    // one cycle per anchor pair needs only h <= t_A.
+                    const std::size_t h_max = (m == 2)
+                        ? (std::size_t) (t_A / 2)
+                        : (std::size_t) std::min<std::uint64_t>(
+                              t_A, t_A * ((m - 1) / 2));
+                    if (h > h_max) h = h_max;
+                    pairs.reserve(h * m);
+                    bad.reserve(h * m);
+                    std::vector<std::size_t> order(m);
+                    for (std::size_t i = 0; i < m; ++i) order[i] = i;
+                    for (std::size_t c = 0; c < h; ++c) {
+                        // Distinct parallel class => the cycles are edge-disjoint.
+                        const std::size_t f1i = (std::size_t) (c % f1.size());
+                        const std::size_t f2i = (std::size_t) ((c / f1.size()) % f2.size());
+                        // Vertex order drawn before any query (Ass. protocol).
+                        for (std::size_t i = m; i > 1; --i) {
+                            std::uniform_int_distribution<std::size_t> d(0, i - 1);
+                            std::swap(order[i - 1], order[d(rng)]);
+                        }
+                        for (std::size_t i = 0; i < m; ++i) {
+                            const index_t x = near[order[i]];
+                            const index_t y = near[order[(i + 1) % m]];
+                            if (m == 2 && i == 1) break;   // avoid the duplicate edge
+                            const bool agree = query_pairs_together(
+                                input, x, y, f1[f1i], f2[f2i], branch_cut.oracle, track);
+                            pairs.push_back(std::make_pair(x, y));
+                            bad.push_back(agree ? 0 : 1);
+                        }
+                    }
+                } else {
+                std::vector<std::uint64_t> picks;
+                corner_row_sample_indices(population, want, rng, picks);
+
+                // Decode each sampled coordinate, query it, and record the pair.
+                pairs.reserve(picks.size());
+                bad.reserve(picks.size());
+                for (std::uint64_t code : picks) {
+                    const std::uint64_t f2i = code % f2.size();
+                    code /= f2.size();
+                    const std::uint64_t f1i = code % f1.size();
+                    code /= f1.size();
+                    // Unrank code in [0, npairs) to an unordered pair of `near`.
+                    std::uint64_t xi = 0, rem = code;
+                    while (rem >= m - 1 - xi) { rem -= (m - 1 - xi); ++xi; }
+                    const std::uint64_t yi = xi + 1 + rem;
+                    const index_t x = near[xi], y = near[yi];
+                    const bool agree = query_pairs_together(
+                        input, x, y, f1[f1i], f2[f2i], branch_cut.oracle, track);
+                    pairs.push_back(std::make_pair(x, y));
+                    bad.push_back(agree ? 0 : 1);
+                }
+                }
+
+                if (propagate) {
+                    EdgeEvidence ev;
+                    ev.pairs = pairs;
+                    ev.bad = bad;
+                    ev.nearmask = nearmask;
+                    evidence[i].push_back(ev);
+                }
+
+                for (std::size_t ui = 0; ui < clusters.size(); ++ui) {
+                    const std::vector<std::uint64_t> &U = clusters[ui];
+                    if (!bits_any(U) || !bits_subset(U, nearmask)) continue;
+                    if (bits_equal(U, nearmask)) continue;   // U must be proper
+                    std::size_t M = 0, C = 0;
+                    for (std::size_t j = 0; j < pairs.size(); ++j) {
+                        const bool in_x = bits_test(U, pairs[j].first);
+                        const bool in_y = bits_test(U, pairs[j].second);
+                        if (in_x == in_y) continue;          // does not cross U
+                        ++M;
+                        C += bad[j];
+                    }
+                    if (M < (std::size_t) branch_cut.min_support) continue;
+                    const weight_t rate = (weight_t) C / (weight_t) M;
+                    if (rate > worst) {
+                        worst = rate;
+                        // The cluster that best explains this edge is the seed
+                        // candidate phase 2 propagates. Recorded only when
+                        // propagating, so the early exit below is unaffected.
+                        //
+                        // Only track 0 may supply a seed. Lem. seed certifies a
+                        // cluster because the perfect answer there is a
+                        // FOUR-CYCLE, which is what the certificate track
+                        // (t1/sym) tests. `maj` is an "unsupported" detector --
+                        // it fires on any quartet that loses its plurality, most
+                        // often a short branch -- so a cluster it flags is not a
+                        // reticulation branch and propagating it costs
+                        // sensitivity with no certificate behind it.
+                        if (propagate && track == 0) seed_of[i] = (int) ui;
+                    }
+                    if ((double) C > tau_t * (double) M) {
+                        reject = true;
+                        // Without propagation the first firing cluster settles
+                        // the edge; with it, keep scanning so the seed is the
+                        // argmax rather than whichever cluster happened first.
+                        if (!propagate) break;
+                    }
+                }
+            }
+          }
+        }
+
+        // Edge-level corner-resolution test: did T' pick the locally best of the
+        // three corner pairings? Aimed at ASTRAL errors, which the cluster
+        // certificate cannot see because they are not blobs at all.
+        double res_z = std::numeric_limits<double>::infinity();
+        double res_margin = std::numeric_limits<double>::infinity();
+        if (!reject
+            && (branch_cut.resolution_z != 0.0 || branch_cut.resolution_margin != 0.0)) {
+            // `rng` is shared with the cluster sampling above, so this call must
+            // stay in the same place and draw the same number of values as the
+            // block it replaced, or every --branchcut-blob result shifts.
+            if (corner_resolution_score(input, corners, branch_cut.samples, rng,
+                                        &res_margin, &res_z, nullptr)) {
+                if (branch_cut.resolution_margin != 0.0
+                    && res_margin < (double) branch_cut.resolution_margin)
+                    reject = true;
+                if (branch_cut.resolution_z != 0.0
+                    && res_z < (double) branch_cut.resolution_z)
+                    reject = true;
+            }
+        }
+
+        std::cout << "branch-cut: " << (reject ? "REJECT" : "ACCEPT")
+                  << " (best cluster rate " << worst
+                  << ", resolution margin " << res_margin << ")" << std::endl;
+        if (propagate) screened[i] = reject ? 1 : 0;
+        if (reject) false_positive.insert(edge);
+        edge->min_pvalue = reject ? 0.0 : 1.0;
+        edge->max_pvalue = 0.0;
+        edge->min_f[0] = edge->min_f[1] = edge->min_f[2] = 0.0;
+        edge->split_match_count = edge->split_mismatch_count = 0;
+
+        std::vector<index_t> A, B;
+        for (Node *leaf : bips[i].first) A.push_back(leaf->index);
+        for (Node *leaf : bips[i].second) B.push_back(leaf->index);
+        std::vector<index_t> witness;
+        if (A.size() >= 2 && B.size() >= 2) witness = {A[0], A[1], B[0], B[1]};
+        else {
+            witness.insert(witness.end(), A.begin(), A.end());
+            witness.insert(witness.end(), B.begin(), B.end());
+        }
+        if (witness.empty()) witness.push_back(0);
+        for (std::size_t j = 0; j < 4; ++j)
+            edge->minimizer[j] = witness[std::min(j, witness.size() - 1)];
+    }
+
+    // Phase 2: propagation. The clusters that fired during screening are the
+    // candidate reticulation branches; a blob contributes a connected clump of
+    // collapsed edges that all share one, so a seed found at any edge of the
+    // clump certifies the rest. Testing a FIXED cluster carries none of the
+    // maximisation penalty of phase 1, which is what licenses the lower bar.
+    if (propagate) {
+        std::vector<int> seeds;
+        for (std::size_t i = 0; i < internal.size(); ++i)
+            if (screened[i] && seed_of[i] >= 0) seeds.push_back(seed_of[i]);
+        std::sort(seeds.begin(), seeds.end());
+        seeds.erase(std::unique(seeds.begin(), seeds.end()), seeds.end());
+
+        const double tau2 = (double) branch_cut.propagate_tau;
+        std::size_t promoted = 0;
+        for (std::size_t i = 0; i < internal.size(); ++i) {
+            Node *edge = internal[i];
+            if (edge->isfake || screened[i]) continue;
+            bool reject = false;
+            for (int ui : seeds) {
+                const std::vector<std::uint64_t> &U = clusters[ui];
+                for (const EdgeEvidence &ev : evidence[i]) {
+                    if (!bits_any(U) || !bits_subset(U, ev.nearmask)) continue;
+                    if (bits_equal(U, ev.nearmask)) continue;
+                    std::size_t M = 0, C = 0;
+                    for (std::size_t j = 0; j < ev.pairs.size(); ++j) {
+                        const bool in_x = bits_test(U, ev.pairs[j].first);
+                        const bool in_y = bits_test(U, ev.pairs[j].second);
+                        if (in_x == in_y) continue;
+                        ++M;
+                        C += ev.bad[j];
+                    }
+                    if (M < (std::size_t) branch_cut.min_support) continue;
+                    if ((double) C > tau2 * (double) M) { reject = true; break; }
+                }
+                if (reject) break;
+            }
+            if (reject) {
+                ++promoted;
+                false_positive.insert(edge);
+                edge->min_pvalue = 0.0;
+            }
+        }
+        std::cout << "propagation: " << seeds.size() << " seed cluster(s), "
+                  << promoted << " further edge(s) contracted at tau2 = "
+                  << tau2 << std::endl;
+    }
+
+    if (display->root->children.size() == 2)
+        false_positive.insert(display->root->children[1]);
+
+    root = build_refinement(display->root, false_positive);
+}
+
 // CornerRowContraction (Algorithm "refinement-edge-sweep"): edge-by-edge
 // reconstruction of the tree of blobs T from a binary refinement T'. Every
 // internal edge of T' is tested with rows built only from that edge's four corner
@@ -2369,6 +3079,10 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
               << ", tau=" << tau
               << ", query alpha=" << corner_row.query_alpha
               << ", seed=" << corner_row.seed << std::endl;
+
+    // Separate stream for the resolution test, so that turning it on cannot
+    // perturb the phase 1 row sample and every pre-existing run reproduces.
+    std::mt19937_64 resolution_rng(corner_row.seed ^ 0x9E3779B97F4A7C15ULL);
 
     // Corner sets of every internal edge, computed up front.
     std::vector<std::array<std::vector<index_t>, 4>> edge_corners(internal.size());
@@ -2527,6 +3241,21 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                         }
                     }
                     if (bad_rows >= need) { flagged = true; break; }
+                }
+            }
+            // Corner-resolution test, orthogonal to the contradiction test
+            // above: it asks whether T' picked the locally best of the three
+            // corner pairings, which is what an ASTRAL error gets wrong and a
+            // blob does not. Uses its own generator so the phase 1 sample, and
+            // hence every pre-existing corner-row result, is untouched.
+            if (!flagged && corner_row.resolution_margin != 0.0) {
+                double res_margin = std::numeric_limits<double>::infinity();
+                if (corner_resolution_score(input, edge_corners[i].data(),
+                                            corner_row.resolution_samples,
+                                            resolution_rng, &res_margin,
+                                            nullptr, nullptr)
+                    && res_margin < (double) corner_row.resolution_margin) {
+                    flagged = true;
                 }
             }
             std::cout << "corner-row: " << (flagged ? "REJECT" : "ACCEPT")

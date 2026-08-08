@@ -36,9 +36,20 @@ class Instance {
         bool rowsweep_dump_all_targets, rowsweep_dump_all_anchors;
         weight_t rowsweep_delta, rowsweep_query_alpha;
         unsigned long int corner_row_k, corner_row_heavy, corner_row_seed;
+        unsigned long int corner_row_resolution_samples;
+        double corner_row_resolution_margin;
+        double branch_cut_propagate_tau;
+        unsigned long int branch_cut_cycles;
         bool corner_row_cross;
+        std::string rowsweep_row_mode_spec;
+        unsigned long int rowsweep_seed;
         std::string corner_row_corroborate_spec;
         std::string oracle_spec, rowsweep_tau_spec, rowsweep_heavy_spec;
+        std::string rowsweep_tau2_spec;
+        std::string rowsweep_score_out;
+        std::string branch_cut_tau_spec;
+        weight_t branch_cut_resolution_z, branch_cut_resolution_margin;
+        unsigned long int branch_cut_min_support, branch_cut_samples, branch_cut_seed;
         unsigned long int rowsweep_anchors;
         weight_t oracle_cf_max, oracle_margin;
         std::string corner_row_tau_spec;
@@ -46,7 +57,7 @@ class Instance {
         std::string normal_mode, weight_mode, execute_mode, taxa_mode, score_mode, data_mode, brln_mode;
         unsigned long int refine_seed, cut_seed, iter_limit, iter_limit_blob;
         weight_t support_low, support_high, support_default, support_threshold, blob_threshold, alpha, beta;
-        bool contract, char2tree, rootonly, pcsonly, blob, store_pvalue, load_pvalue, enable_split_test, override_file, three_fix_one_alter, two_fix_two_alter, row_sweep_blob, corner_row_blob, quard, network;
+        bool contract, char2tree, rootonly, pcsonly, blob, store_pvalue, load_pvalue, enable_split_test, override_file, three_fix_one_alter, two_fix_two_alter, row_sweep_blob, corner_row_blob, branch_cut_blob, quard, network;
         int parse(int argc, char **argv);
         #if ENABLE_TOB
         RowSweepParams build_row_sweep_params(std::string *error) const;

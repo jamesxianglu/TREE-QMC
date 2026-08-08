@@ -7,6 +7,8 @@
 #include <tuple>
 #include <string>
 #include <vector>
+#include <cstdint>
+#include <random>
 
 class QCFWriter;
 
@@ -230,6 +232,18 @@ struct OracleTerm {
     bool use_t3;        // require T3 to reject every tree quartet
     bool use_cf;        // require the target concordance factor < cf_max
     bool use_majority;  // require some other topology to lead by > margin
+    bool use_sym = false;  // require the two MINOR counts to be asymmetric
+                        // (chi-square, 1 df).  If e is a cut edge then, once
+                        // the near-side lineages fail to coalesce, they cross e
+                        // as an interchangeable pair, so the two discordant
+                        // topologies are exactly exchangeable whatever blobs
+                        // sit elsewhere -- and asymmetry between them is the
+                        // reticulation signature itself.  Measured on n15+n25
+                        // this carries all of T1's discriminating power (J
+                        // within 0.005 of t1 at every alpha), while T1's other
+                        // half -- "the target is not the plurality" -- carries
+                        // essentially none (J 0.22).  Unlike T1 it is closed
+                        // form, so it needs no R call at all.
 };
 
 struct OracleSpec {
@@ -259,11 +273,144 @@ struct OracleSpec {
 //
 // `anchors` > 1 repeats the sweep from several taxa of R rather than always R[0].
 // It helped at n15 and not at n25; see results/analysis/ROWSWEEP_FINDINGS.md.
+// How a row's far-side pair is chosen. The published rule fixes one anchor
+// rho = R[0] for the whole edge, so every row (x, r) is conditioned on the pair
+// (rho, r) and a single anomalous pair contaminates the entire row. See
+// doc/HANDOFF.md section 5.
+enum class RowSweepRowMode {
+    Fixed,   // rho = R[0] for every row (published behaviour)
+    Random,  // each partner column draws its own rho from R \ {r}
+    Pooled   // as Random, and one row per x pooling every column, so a single
+             // pair contributes 1/|R| of the statistic instead of all of it
+};
+
 struct RowSweepParams {
     OracleSpec oracle;
     std::vector<weight_t> tau;            // one per track
     std::vector<unsigned long int> heavy; // one per track
     unsigned long int anchors;            // 0 means every taxon of R
+    RowSweepRowMode row_mode = RowSweepRowMode::Fixed;  // Fixed = published rule
+    unsigned long int seed = 20250729;    // anchor draws for Random/Pooled
+
+    // Second-stage threshold, one per track, applied only to edges adjacent to
+    // an edge the first stage rejected.  A blob of degree k resolved binarily
+    // contributes exactly k-3 spurious edges of T' and they form a *connected
+    // subtree*, so every spurious edge of a degree>=5 blob has a spurious
+    // neighbour by construction.  Measured over the shipped runs at n50-n200:
+    // among the edges the sweep KEEPS, 84.8% of the blob-internal ones sit next
+    // to a rejection against 19.9% of the true ones -- a likelihood ratio of
+    // 4.25 that no per-edge test can see.  Empty, or tau2 >= tau, leaves the
+    // rule exactly one-stage.
+    std::vector<weight_t> tau2;
+
+    // Optional path for a per-edge dump of the continuous statistic, so a
+    // whole tau curve can be swept offline from a single run.
+    std::string score_out;
+};
+
+// BranchCutContraction (theory.tex Algorithm "branch-cut-contraction").
+//
+// For a refinement-only edge the reticulation branch at the blob vertex is an
+// edge-induced cluster of T' contained in one corner, and *every* query whose
+// near-side pair crosses that cluster is a perfect contradiction. Enumerating
+// the clusters therefore gives a witness family of density 1 rather than the
+// density 1/2 of the corner-row lemma, which is what widens the certified noise
+// range from delta < 1/3 to delta < 1/2.
+//
+// Two deliberate departures from the algorithm as stated, both measured on the
+// recorded evidence (doc/NEW_ALGORITHMS.md section 3):
+//
+//   tau  The theorem rejects when a cluster's crossing coordinates contradict
+//        more than half the time, because under a *perfect* oracle that family
+//        is fully bad. The statistical surrogate detects a known four-cycle only
+//        about 0.673 of the time, and a cluster that is only approximately the
+//        reticulation branch dilutes that further, so 1/2 is far too high: it
+//        halves trr_blob against the corner row. Sweeping tau down to ~0.1-0.3
+//        recovers it at no cost in sensitivity. tau is therefore exposed and
+//        defaults well below 1/2.
+//
+//   min_support  The rule maximises over ~2n clusters, so a cluster with a
+//        single crossing coordinate that happens to contradict satisfies
+//        C > tau*M outright. A perfect oracle's union bound absorbs this; a real
+//        surrogate does not. Clusters with fewer than min_support crossing
+//        coordinates are skipped.
+struct BranchCutParams {
+    std::vector<weight_t> tau;     // reject when C_U > tau[t] * M_U, one per
+                                   // oracle track (so a noisy indicator such as
+                                   // `maj` can be admitted under a stricter bar
+                                   // than the reticulation certificate needs)
+    unsigned long int min_support; // ignore clusters with M_U < this
+    unsigned long int samples;     // per side, as a multiple of |side|; 0 = all
+    // Number of edge-disjoint spanning cycles per side, i.e. the `h` of
+    // Lem. cycle-cover and Thm. cycle-cover-global. 0 keeps the older uniform
+    // random sampling, which is NOT the published algorithm.
+    //
+    // Why this matters. Tests_A(e) is the multigraph t_A K_|A| with
+    // t_A = |B1||B2| parallel classes, one per anchor pair (b1,b2). Lem.
+    // cycle-cover picks h edge-disjoint spanning cycles from it, and a spanning
+    // cycle meets every vertex, so it crosses every nonempty proper subset an
+    // even positive number of times: **M_U >= 2h for EVERY cluster U,
+    // deterministically**. That bound is what the proof of
+    // Thm. cycle-cover-global uses for its depth, and it is exactly what
+    // uniform random sampling fails to provide -- which is why the random path
+    // needs `min_support`, a guard the published algorithm does not have.
+    //
+    // Construction used here: take one spanning cycle per distinct anchor pair.
+    // Cycles in different parallel classes are automatically edge-disjoint, so
+    // no Walecki decomposition is needed whenever h <= t_A; that covers every
+    // edge in this benchmark. The per-cycle vertex order is a seeded
+    // permutation drawn before any query, as Ass. protocol requires.
+    //
+    // Budget is h*|side| coordinates per side, so `--branchcut-cycles h` is
+    // budget-matched to `--branchcut-samples h`.
+    unsigned long int cycles;
+    // Edge-level test aimed at the OTHER half of N. A blob-internal edge is
+    // compatible with T and needs four-cycle signal; an ASTRAL-error edge
+    // *conflicts* with T, so some 4-set's perfect answer is a resolved quartet
+    // with a different topology -- a first-order difference in concordance
+    // factors rather than a second-order asymmetry between minors.
+    //
+    // For a 4-set with one taxon per corner the three quartet topologies are in
+    // bijection with the three ways of pairing the corners, so summing qCFs
+    // over the cross-corner family scores the three local resolutions:
+    //   w0 = (A1A2)(B1B2)  the resolution T' chose,  w1, w2 = the two NNIs.
+    // Reject when the pooled effect size
+    //   margin = (w0 - max(w1,w2)) / (w0 + w1 + w2)
+    // falls below `resolution_margin`. Measured medians: 0.26 on retained
+    // edges against 0.009 on ASTRAL-error edges, and every one of the 46
+    // ASTRAL-error edges observed lies in [-0.05, 0.05].
+    //
+    // `margin` is dimensionless. The earlier form
+    //   z = (w0 - max(w1,w2)) / sqrt(w0 + max(w1,w2))
+    // has identical discriminating power (held-out AUC 0.978 for both) but
+    // scales as sqrt(M L) in the number of pooled 4-sets M and loci L, so its
+    // threshold drifts with n: the best cut moves 4.2 -> 5.7 -> 7.3 from n15 to
+    // n50 while median M grows 24 -> 135. The margin's best cut stays inside
+    // [0.018, 0.044] and, more usefully, sensitivity at a *fixed* cut is stable
+    // (0.988 / 0.979 / 0.985 at 0.01). Prefer `resolution_margin`;
+    // `resolution_z` is kept only to reproduce earlier runs.
+    //
+    // A per-4-set counter is much weaker: the fraction of 4-sets whose target
+    // pairing wins scores AUC 0.772 against the margin's 0.974, so pool the
+    // counts rather than counting wins. Combining the margin with the
+    // refinement's own support and branch length does not help either (0.979
+    // against 0.978 held out), so the signal is one-dimensional.
+    weight_t resolution_z;
+    weight_t resolution_margin;
+    // Seed-and-propagate (theory.tex Alg. seed-and-propagate), 0 = off.
+    // Phase 1 scores an edge by the MAXIMUM over ~2n clusters, so its null is
+    // inflated by the maximisation. Lem. propagation says a retained edge gives
+    // a null family against ANY fixed cluster, so once the reticulation branch
+    // is known no maximisation is needed and the bar can drop. Measured on
+    // n15+n25: the 99th percentile of the statistic on retained edges is 0.080
+    // for the max against 0.0030 for a fixed cluster, 27x tighter. Phase 2
+    // re-tests the surviving edges against the clusters that fired in phase 1,
+    // at this threshold. Because a fixed cluster's rate never exceeds the max,
+    // it can only fire where propagate_tau < rate <= tau -- a strict addition.
+    weight_t propagate_tau;
+    weight_t query_alpha;
+    unsigned long int seed;
+    OracleSpec oracle;
 };
 
 struct CornerRowParams {
@@ -277,6 +424,14 @@ struct CornerRowParams {
                                 // four corners; false reproduces Omega_x(e)
     std::vector<unsigned long int> corroborate;  // bad rows demanded, per track;
                                 // 1 is the original "flag on the first bad row"
+    // Edge-level corner-resolution test, shared with branch cut; see the long
+    // note on BranchCutParams::resolution_margin. It targets the ASTRAL-error
+    // half of N, which the contradiction test cannot see because those edges
+    // are not blobs at all: they *conflict* with T, so some 4-set's perfect
+    // answer is a resolved quartet with a different topology. 0 disables it,
+    // which reproduces the original behaviour exactly.
+    weight_t resolution_margin;
+    unsigned long int resolution_samples;  // multiple of the corner-size sum
     OracleSpec oracle;          // "t1" reproduces the original behaviour exactly
 };
 #endif  // ENABLE_TOB
@@ -290,6 +445,26 @@ class SpeciesTree : public Tree {
         SpeciesTree(Tree *input, Dict *dict, weight_t alpha, weight_t beta, bool enable_split_test);
         SpeciesTree(std::vector<Tree *> &input, Dict *dict, SpeciesTree* display, const RowSweepParams &row_sweep);
         SpeciesTree(std::vector<Tree *> &input, Dict *dict, SpeciesTree* display, const CornerRowParams &corner_row);
+        SpeciesTree(std::vector<Tree *> &input, Dict *dict, SpeciesTree* display, const BranchCutParams &branch_cut);
+        // Every edge-induced cluster of T' as a leaf-index bitmask (both sides
+        // of every edge). The branch-cut certificate is one such cluster.
+        bool quartet_counts(std::vector<Tree *> &input, index_t a, index_t b, index_t c, index_t d, weight_t out[3]);
+        // Pooled cross-corner resolution score for one edge: sums raw gene-tree
+        // counts over 4-sets drawn from A1 x A2 x B1 x B2 into the three
+        // corner-pairing scores w0 (the pairing T' asserts), w1, w2 (the NNIs),
+        // and reports the scale-free margin (w0 - max(w1,w2)) / sum(w) and the
+        // older scale-dependent z. See BranchCutParams for what these measure.
+        //
+        // `rng` is taken by reference and consumed in place: the branch-cut
+        // caller shares one stream between cluster sampling and this test, so
+        // the number of draws taken here is part of that run's identity.
+        // `samples` is a multiple of the corner-size SUM (0 = exhaustive),
+        // which differs from the cluster scan's multiple of |side|.
+        //
+        // Returns false, leaving the outputs untouched, when a corner is empty
+        // or no sampled 4-set resolved.
+        bool corner_resolution_score(std::vector<Tree *> &input, const std::vector<index_t> *corners, unsigned long int samples, std::mt19937_64 &rng, double *margin, double *z, std::size_t *pooled);
+        void branch_cut_clusters(Node *root, std::size_t nwords, std::vector<std::vector<std::uint64_t>> &out, std::vector<std::uint64_t> &universe);
         SpeciesTree(std::vector<Tree *> &input, Dict *dict, SpeciesTree* display, QCFWriter *qcf_writer = nullptr);
         SpeciesTree(std::vector<Tree *> &input, Dict *dict, SpeciesTree* display, unsigned long int iter_limit_blob, QCFWriter *qcf_writer = nullptr);
         SpeciesTree(std::vector<Tree *> &input, Dict *dict, SpeciesTree* display, unsigned long int iter_limit_blob, bool three_fix_one_alter, bool two_fix_two_alter, bool is_quard, const std::string &output_qcfs_table_file = "");
@@ -405,6 +580,11 @@ class SpeciesTree : public Tree {
         bool is_match_with_split(const std::array<weight_t,3>& qcf, index_t node_a1_id, index_t node_a2_id, index_t *indices);
         bool query_pairs_together(std::vector<Tree *> &input, index_t x, index_t y, index_t rho, index_t r, const OracleSpec &oracle, std::size_t track = 0);
         bool row_sweep_test_idx(std::vector<Tree *> &input, const std::vector<index_t> &A, const std::vector<index_t> &B, const RowSweepParams &params);
+        // The continuous statistic behind row_sweep_test_idx: for each track,
+        // the value the rule compares against tau[t], so that
+        //   REJECT  <=>  score[t] > tau[t] for some t.
+        // Only the Fixed row mode is scored; the others return an empty vector.
+        std::vector<weight_t> row_sweep_scores_idx(std::vector<Tree *> &input, const std::vector<index_t> &A, const std::vector<index_t> &B, const RowSweepParams &params);
         bool corner_sets_for_edge(Tree *refinement, Node *edge, std::vector<index_t> corners[4]);
         weight_t search_2f2a(std::vector<Tree *> &input, std::vector<Node *> &A, std::vector<Node *> &B, index_t* minimizer, size_t &split_match_count, size_t &split_mismatch_count, index_t branch_id = 0, QCFWriter *qcf_writer = nullptr);
         #endif  // ENABLE_TOB
