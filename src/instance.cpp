@@ -49,6 +49,7 @@ Instance::Instance(int argc, char **argv) {
     branch_cut_corroborate_bar = 0.0;     // 0 = the inner bar is tau itself
     branch_cut_cmin = 0;                  // 0 = no absolute contradiction floor
     branch_cut_min_depth = 0;             // 0 = no targeted depth lift
+    branch_cut_reuse_min_anchors = 1;     // 1 = lift on every edge
     branch_cut_trim = 0;                  // 0 = untrimmed, the published rule
     branch_cut_res_min_pooled = 0;        // 0 = no support guard on the margin
     branch_cut_min_support = 4;
@@ -481,6 +482,7 @@ long long Instance::solve() {
                 branch_cut.corroborate_bar = branch_cut_corroborate_bar;
                 branch_cut.cmin = branch_cut_cmin;
                 branch_cut.min_depth = branch_cut_min_depth;
+                branch_cut.reuse_min_anchors = branch_cut_reuse_min_anchors;
                 std::string bc_error;
                 branch_cut.oracle = OracleSpec::parse(oracle_spec,
                                                       rowsweep_query_alpha,
@@ -1407,6 +1409,14 @@ int Instance::parse(int argc, char **argv) {
         else if (opt == "--branchcut-quad-out") {
             if (i < argc - 1) branch_cut_quad_out = argv[++ i];
             else { std::cout << "\nERROR: --branchcut-quad-out needs a value" << std::endl; return 1; }
+        }
+        else if (opt == "--branchcut-reuse-min-anchors") {
+            if (i < argc - 1) {
+                if (!s2ul(argv[++ i], &branch_cut_reuse_min_anchors)) {
+                    std::cout << "\nERROR: invalid --branchcut-reuse-min-anchors" << std::endl;
+                    return 1;
+                }
+            } else { std::cout << "\nERROR: --branchcut-reuse-min-anchors needs a value" << std::endl; return 1; }
         }
         else if (opt == "--branchcut-min-depth") {
             if (i < argc - 1) {

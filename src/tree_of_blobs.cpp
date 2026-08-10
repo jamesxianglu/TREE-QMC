@@ -3170,7 +3170,11 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                         : std::min<std::uint64_t>(
                               t_A * std::max<std::uint64_t>(1, (m - 1) / 2),
                               (std::uint64_t) 1 << 32);
-                    std::size_t h_max = (std::size_t) (branch_cut.cycle_reuse
+                    // Only lift the cap where there are enough distinct anchor
+                    // pairs for the extra depth to be independent evidence.
+                    const bool may_reuse = branch_cut.cycle_reuse
+                        && t_A >= (std::uint64_t) branch_cut.reuse_min_anchors;
+                    std::size_t h_max = (std::size_t) (may_reuse
                         ? h_avail
                         : ((m == 2) ? (t_A / 2)
                                     : std::min<std::uint64_t>(t_A, t_A * ((m - 1) / 2))));
@@ -3191,8 +3195,7 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                     // uncorroborable and the edge unrejectable.
                     if (G > 1) { grp.reserve(h * m); Geff = std::min(G, h); }
                     std::unordered_set<std::uint64_t> seen;
-                    const bool dedup = (branch_cut.cycle_reuse
-                                        || branch_cut.min_depth > 0)
+                    const bool dedup = (may_reuse || branch_cut.min_depth > 0)
                                        && (std::uint64_t) h > t_A;
                     if (dedup) seen.reserve(h * m * 2);
                     std::vector<std::size_t> order(m);

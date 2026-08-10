@@ -372,6 +372,18 @@ struct BranchCutParams {
     // saturation, is what made h = 64 and h = 200 indistinguishable from h = 32,
     // because for a far cherry t_A = 1.
     bool cycle_reuse;
+    // Minimum number of ANCHOR PAIRS (t_A = |B1||B2|) an edge must have before
+    // cycle_reuse is allowed to lift its depth. 1 = lift everywhere.
+    //
+    // Measured at n100 (arm C vs arm A, 50 replicates, doc/FINDINGS §24): reuse
+    // rescues net +11 true edges on edges with t_A in [2,32] and net **-4** on
+    // edges with t_A = 1, where it is measurably harmful. The mechanism is the
+    // one Ass. blocked describes: with a single anchor pair the extra cycles are
+    // not new anchors, they re-query the same (b1,b2) with different near-side
+    // pairs, so the depth buys CORRELATED evidence and amplifies whatever is
+    // idiosyncratic about that anchor instead of averaging it away. Depth pays
+    // only where there is anchor diversity to spread it over.
+    unsigned long int reuse_min_anchors;
     // Minimum depth to lift a THIN edge to, using the same extra-cycle
     // mechanism as `cycle_reuse` but stopping as soon as the count floor is
     // cleared instead of going all the way to `cycles`.

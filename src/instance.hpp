@@ -42,7 +42,7 @@ class Instance {
         unsigned long int branch_cut_cycles, branch_cut_trim, branch_cut_res_min_pooled;
         unsigned long int branch_cut_corroborate;
         weight_t branch_cut_corroborate_frac, branch_cut_corroborate_bar;
-        unsigned long int branch_cut_cmin, branch_cut_min_depth;
+        unsigned long int branch_cut_cmin, branch_cut_min_depth, branch_cut_reuse_min_anchors;
         bool corner_row_cross;
         std::string rowsweep_row_mode_spec;
         unsigned long int rowsweep_seed;
