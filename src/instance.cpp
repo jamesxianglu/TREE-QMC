@@ -44,9 +44,33 @@ Instance::Instance(int argc, char **argv) {
     branch_cut_resolution_margin = 0.0;   // off by default
     branch_cut_propagate_tau = 0.0;       // off by default (no phase 2)
     branch_cut_cycles = 0;                // 0 = the older uniform random sampling
+    branch_cut_corroborate = 0;           // 0/1 = no split-sample corroboration
+    branch_cut_corroborate_frac = 1.0;    // all groups must fire
+    branch_cut_corroborate_bar = 0.0;     // 0 = the inner bar is tau itself
+    branch_cut_cmin = 0;                  // 0 = no absolute contradiction floor
+    branch_cut_min_depth = 0;             // 0 = no targeted depth lift
+    branch_cut_trim = 0;                  // 0 = untrimmed, the published rule
+    branch_cut_res_min_pooled = 0;        // 0 = no support guard on the margin
     branch_cut_min_support = 4;
     branch_cut_samples = 8;
     branch_cut_seed = 20250729;
+    branch_cut_contrast_alpha = 0.0;      // 0 = off, absolute-tau rule only
+    branch_cut_margin_q10 = 0.0;          // margin-dispersion rules, all off
+    branch_cut_margin_sd = 0.0;
+    branch_cut_margin_min = 0.0;
+    branch_cut_margin_min_sets = 8;
+    branch_cut_cluster_margin = 0.0;
+    branch_cut_tau_low = 0.0;
+    branch_cut_tau_high = 0.0;
+    branch_cut_mlc_d = 0.0;
+    branch_cut_mlc_t = 0.0;
+    branch_cut_mlc_min_group = 5;
+    branch_cut_fixed_streams = false;     // shared stream, as earlier runs used
+    branch_cut_cycle_reuse = false;       // keep the h <= t_A cap
+    branch_cut_shared_coords = false;     // one sample per track, as before
+    branch_cut_mode_spec = "";            // every track uses the cluster scan
+    branch_cut_score_out = "";
+    branch_cut_quad_out = "";
     // Corner-row resolution test: off by default, so every earlier corner-row
     // run reproduces. The sample budget is a multiple of the corner-size sum;
     // 0 would be exhaustive, which is |A1||A2||B1||B2| ~ n^4/256 per edge.
@@ -431,9 +455,32 @@ long long Instance::solve() {
                 branch_cut.resolution_margin = branch_cut_resolution_margin;
                 branch_cut.propagate_tau = branch_cut_propagate_tau;
                 branch_cut.cycles = branch_cut_cycles;
+                branch_cut.trim = branch_cut_trim;
+                branch_cut.resolution_min_pooled = branch_cut_res_min_pooled;
                 branch_cut.samples = branch_cut_samples;
                 branch_cut.query_alpha = rowsweep_query_alpha;
                 branch_cut.seed = branch_cut_seed;
+                branch_cut.contrast_alpha = branch_cut_contrast_alpha;
+                branch_cut.margin_q10 = branch_cut_margin_q10;
+                branch_cut.margin_sd = branch_cut_margin_sd;
+                branch_cut.margin_min = branch_cut_margin_min;
+                branch_cut.margin_min_sets = branch_cut_margin_min_sets;
+                branch_cut.cluster_margin = branch_cut_cluster_margin;
+                branch_cut.tau_low = branch_cut_tau_low;
+                branch_cut.tau_high = branch_cut_tau_high;
+                branch_cut.mlc_d = branch_cut_mlc_d;
+                branch_cut.mlc_t = branch_cut_mlc_t;
+                branch_cut.mlc_min_group = branch_cut_mlc_min_group;
+                branch_cut.fixed_streams = branch_cut_fixed_streams;
+                branch_cut.cycle_reuse = branch_cut_cycle_reuse;
+                branch_cut.shared_coords = branch_cut_shared_coords;
+                branch_cut.score_out = branch_cut_score_out;
+                branch_cut.quad_out = branch_cut_quad_out;
+                branch_cut.corroborate = branch_cut_corroborate;
+                branch_cut.corroborate_frac = branch_cut_corroborate_frac;
+                branch_cut.corroborate_bar = branch_cut_corroborate_bar;
+                branch_cut.cmin = branch_cut_cmin;
+                branch_cut.min_depth = branch_cut_min_depth;
                 std::string bc_error;
                 branch_cut.oracle = OracleSpec::parse(oracle_spec,
                                                       rowsweep_query_alpha,
@@ -460,6 +507,26 @@ long long Instance::solve() {
                             exit(1);
                         }
                         branch_cut.tau.push_back(tau);
+                    }
+                    // Per-track rule: `cluster` (the scan) or `global` (one
+                    // rate test on the whole side). Absent = all cluster.
+                    if (!branch_cut_mode_spec.empty()) {
+                        std::vector<std::string> modes = split_csv(branch_cut_mode_spec);
+                        if (modes.size() != 1 && modes.size() != n_tracks) {
+                            std::cout << "\nERROR: --branchcut-mode needs one value "
+                                      << "or one per oracle track" << std::endl;
+                            exit(1);
+                        }
+                        for (std::size_t t = 0; t < n_tracks; ++t) {
+                            const std::string &m = modes[modes.size() == 1 ? 0 : t];
+                            if (m == "cluster") branch_cut.mode.push_back(0);
+                            else if (m == "global") branch_cut.mode.push_back(1);
+                            else {
+                                std::cout << "\nERROR: --branchcut-mode must be "
+                                          << "`cluster` or `global`: " << m << std::endl;
+                                exit(1);
+                            }
+                        }
                     }
                 }
                 SpeciesTree* branch_cut_tree = new SpeciesTree(
@@ -1251,6 +1318,20 @@ int Instance::parse(int argc, char **argv) {
         else if (opt == "--corner-cross") {
             corner_row_cross = true;
         }
+        else if (opt == "--branchcut-trim") {
+            if (i + 1 < argc) {
+                if (!s2ul(argv[++ i], &branch_cut_trim)) {
+                    std::cout << "\nERROR: invalid --branchcut-trim" << std::endl; return 1;
+                }
+            } else { std::cout << "\nERROR: --branchcut-trim needs a value" << std::endl; return 1; }
+        }
+        else if (opt == "--resolution-min-pooled") {
+            if (i + 1 < argc) {
+                if (!s2ul(argv[++ i], &branch_cut_res_min_pooled)) {
+                    std::cout << "\nERROR: invalid --resolution-min-pooled" << std::endl; return 1;
+                }
+            } else { std::cout << "\nERROR: --resolution-min-pooled needs a value" << std::endl; return 1; }
+        }
         else if (opt == "--branchcut-cycles") {
             if (i + 1 < argc) {
                 if (!s2ul(argv[++ i], &branch_cut_cycles)) {
@@ -1258,6 +1339,122 @@ int Instance::parse(int argc, char **argv) {
                     return 1;
                 }
             } else { std::cout << "\nERROR: --branchcut-cycles needs a value" << std::endl; return 1; }
+        }
+        else if (opt == "--branchcut-contrast") {
+            if (i < argc - 1) {
+                if (!s2d(argv[++ i], &branch_cut_contrast_alpha)
+                    || branch_cut_contrast_alpha < 0.0
+                    || branch_cut_contrast_alpha > 1.0) {
+                    std::cout << "\nERROR: --branchcut-contrast must lie in [0, 1]" << std::endl;
+                    return 1;
+                }
+            } else { std::cout << "\nERROR: --branchcut-contrast needs a value" << std::endl; return 1; }
+        }
+        else if (opt == "--branchcut-margin-q10") {
+            if (i >= argc - 1 || !s2d(argv[++ i], &branch_cut_margin_q10)) {
+                std::cout << "\nERROR: --branchcut-margin-q10 needs a value" << std::endl; return 1; }
+        }
+        else if (opt == "--branchcut-margin-sd") {
+            if (i >= argc - 1 || !s2d(argv[++ i], &branch_cut_margin_sd)) {
+                std::cout << "\nERROR: --branchcut-margin-sd needs a value" << std::endl; return 1; }
+        }
+        else if (opt == "--branchcut-margin-min") {
+            if (i >= argc - 1 || !s2d(argv[++ i], &branch_cut_margin_min)) {
+                std::cout << "\nERROR: --branchcut-margin-min needs a value" << std::endl; return 1; }
+        }
+        else if (opt == "--branchcut-margin-min-sets") {
+            if (i >= argc - 1 || !s2ul(argv[++ i], &branch_cut_margin_min_sets)) {
+                std::cout << "\nERROR: --branchcut-margin-min-sets needs an integer" << std::endl; return 1; }
+        }
+        else if (opt == "--branchcut-cluster-margin") {
+            if (i >= argc - 1 || !s2d(argv[++ i], &branch_cut_cluster_margin)) {
+                std::cout << "\nERROR: --branchcut-cluster-margin needs a value" << std::endl; return 1; }
+        }
+        else if (opt == "--branchcut-tau-high") {
+            if (i >= argc - 1 || !s2d(argv[++ i], &branch_cut_tau_high)) {
+                std::cout << "\nERROR: --branchcut-tau-high needs a value" << std::endl; return 1; }
+        }
+        else if (opt == "--branchcut-tau-low") {
+            if (i >= argc - 1 || !s2d(argv[++ i], &branch_cut_tau_low)) {
+                std::cout << "\nERROR: --branchcut-tau-low needs a value" << std::endl; return 1; }
+        }
+        else if (opt == "--branchcut-mlc-d") {
+            if (i >= argc - 1 || !s2d(argv[++ i], &branch_cut_mlc_d)) {
+                std::cout << "\nERROR: --branchcut-mlc-d needs a value" << std::endl; return 1; }
+        }
+        else if (opt == "--branchcut-mlc-t") {
+            if (i >= argc - 1 || !s2d(argv[++ i], &branch_cut_mlc_t)) {
+                std::cout << "\nERROR: --branchcut-mlc-t needs a value" << std::endl; return 1; }
+        }
+        else if (opt == "--branchcut-mlc-min-group") {
+            if (i >= argc - 1 || !s2ul(argv[++ i], &branch_cut_mlc_min_group)) {
+                std::cout << "\nERROR: --branchcut-mlc-min-group needs an integer" << std::endl; return 1; }
+        }
+        else if (opt == "--branchcut-mode") {
+            if (i < argc - 1) branch_cut_mode_spec = argv[++ i];
+            else { std::cout << "\nERROR: --branchcut-mode needs a value" << std::endl; return 1; }
+        }
+        else if (opt == "--branchcut-fixed-streams") {
+            branch_cut_fixed_streams = true;
+        }
+        else if (opt == "--branchcut-cycle-reuse") {
+            branch_cut_cycle_reuse = true;
+        }
+        else if (opt == "--branchcut-shared-coords") {
+            branch_cut_shared_coords = true;
+            branch_cut_fixed_streams = true;
+        }
+        else if (opt == "--branchcut-quad-out") {
+            if (i < argc - 1) branch_cut_quad_out = argv[++ i];
+            else { std::cout << "\nERROR: --branchcut-quad-out needs a value" << std::endl; return 1; }
+        }
+        else if (opt == "--branchcut-min-depth") {
+            if (i < argc - 1) {
+                if (!s2ul(argv[++ i], &branch_cut_min_depth)) {
+                    std::cout << "\nERROR: invalid --branchcut-min-depth" << std::endl;
+                    return 1;
+                }
+            } else { std::cout << "\nERROR: --branchcut-min-depth needs a value" << std::endl; return 1; }
+        }
+        else if (opt == "--branchcut-cmin") {
+            if (i < argc - 1) {
+                if (!s2ul(argv[++ i], &branch_cut_cmin)) {
+                    std::cout << "\nERROR: invalid --branchcut-cmin" << std::endl;
+                    return 1;
+                }
+            } else { std::cout << "\nERROR: --branchcut-cmin needs a value" << std::endl; return 1; }
+        }
+        else if (opt == "--branchcut-corroborate-bar") {
+            if (i < argc - 1) {
+                if (!s2d(argv[++ i], &branch_cut_corroborate_bar)
+                    || branch_cut_corroborate_bar < 0.0
+                    || branch_cut_corroborate_bar >= 1.0) {
+                    std::cout << "\nERROR: --branchcut-corroborate-bar must lie in [0, 1)" << std::endl;
+                    return 1;
+                }
+            } else { std::cout << "\nERROR: --branchcut-corroborate-bar needs a value" << std::endl; return 1; }
+        }
+        else if (opt == "--branchcut-corroborate-frac") {
+            if (i < argc - 1) {
+                if (!s2d(argv[++ i], &branch_cut_corroborate_frac)
+                    || branch_cut_corroborate_frac <= 0.0
+                    || branch_cut_corroborate_frac > 1.0) {
+                    std::cout << "\nERROR: --branchcut-corroborate-frac must lie in (0, 1]" << std::endl;
+                    return 1;
+                }
+            } else { std::cout << "\nERROR: --branchcut-corroborate-frac needs a value" << std::endl; return 1; }
+        }
+        else if (opt == "--branchcut-corroborate") {
+            if (i < argc - 1) {
+                if (!s2ul(argv[++ i], &branch_cut_corroborate)) {
+                    std::cout << "\nERROR: invalid --branchcut-corroborate" << std::endl;
+                    return 1;
+                }
+            } else { std::cout << "\nERROR: --branchcut-corroborate needs a value" << std::endl; return 1; }
+        }
+        else if (opt == "--branchcut-score-out") {
+            if (i < argc - 1) branch_cut_score_out = argv[++ i];
+            else { std::cout << "\nERROR: --branchcut-score-out needs a value" << std::endl; return 1; }
         }
         else if (opt == "--branchcut-propagate-tau") {
             if (i + 1 < argc) {

@@ -4,3 +4,5 @@ build/
 external/
 /experiments/site_env.sh
 /experiments/site.conf
+build2/
+build3/

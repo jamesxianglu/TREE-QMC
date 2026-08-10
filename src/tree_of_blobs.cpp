@@ -2557,7 +2557,11 @@ bool SpeciesTree::corner_resolution_score(std::vector<Tree *> &input,
                                           unsigned long int samples,
                                           std::mt19937_64 &rng,
                                           double *margin, double *z,
-                                          std::size_t *pooled) {
+                                          std::size_t *pooled,
+                                          std::vector<double> *per_set,
+                                          std::vector<std::array<index_t, 4>> *per_quad) {
+    if (per_set) per_set->clear();
+    if (per_quad) per_quad->clear();
     if (corners[0].empty() || corners[1].empty()
         || corners[2].empty() || corners[3].empty()) return false;
 
@@ -2597,6 +2601,23 @@ bool SpeciesTree::corner_resolution_score(std::vector<Tree *> &input,
         w[1] += counts[t1];
         w[2] += counts[t2];
         ++used;
+        // Per-4-set margin. The POOLED margin is a location statistic and can
+        // only see an edge whose resolution is wrong throughout -- an ASTRAL
+        // error. A blob-internal edge is a MIXTURE: Lem. branch-restriction
+        // makes only the 4-sets that meet four distinct branches at the blob
+        // vertex anomalous, and the rest look exactly like a retained edge. A
+        // mixture moves the DISPERSION of the per-4-set margins, not their
+        // mean, which is why pooling hides it.
+        if (per_set) {
+            const double s0 = (double) counts[t0], s1 = (double) counts[t1],
+                         s2 = (double) counts[t2];
+            const double tot = s0 + s1 + s2;
+            if (tot > 0.0) {
+                per_set->push_back((s0 - std::max(s1, s2)) / tot);
+                if (per_quad)
+                    per_quad->push_back(std::array<index_t, 4>{a0, b0, c0, d0});
+            }
+        }
     }
     const double wbest = std::max(w[1], w[2]);
     const double wsum = w[0] + w[1] + w[2];
@@ -2670,6 +2691,191 @@ static inline bool bits_test(const std::vector<std::uint64_t> &a, index_t i) {
     return (a[i >> 6] >> (i & 63)) & 1;
 }
 
+// Localised margin contrast.
+//
+// The contradiction certificate and the pooled resolution margin sit at the two
+// extremes of the same statistic. The certificate is cluster-aware but throws
+// away everything except the bit "did this 4-set reject at query_alpha", so an
+// edge whose four-cycle quarnets are never individually significant is SILENT --
+// and 80% of the blob edges branch cut misses are silent, with a cluster rate of
+// exactly zero. The pooled margin keeps the continuous signal but averages over
+// all 4-sets, and Lem. branch-restriction says only the 4-sets that meet four
+// distinct branches at the blob vertex are affected, so pooling dilutes a
+// mixture into its mean. The dispersion of the per-4-set margins sees the
+// mixture but not WHERE it is, so it pays the full variance of an unlabelled
+// two-component problem.
+//
+// This statistic keeps both: for every cluster U of T' that lies properly inside
+// one corner, split the sampled cross-corner 4-sets by whether that corner's
+// taxon falls in U, and compare the two groups' margins. If U is the
+// reticulation branch, Cor. branch-corner-alignment puts it inside exactly one
+// corner and the "in" group is precisely the four-cycle family, so its margins
+// drop while the "out" group stays at the retained-edge level. On a retained
+// edge no cluster separates anything, whatever the branch length -- a short
+// branch lowers ALL the margins together, which is the failure mode a fixed bar
+// on the pooled margin cannot survive.
+//
+// Reports the maximum over clusters of the mean difference (`out` minus `in`)
+// and of the corresponding Welch t.
+static void localised_margin_contrast(
+        const std::vector<std::vector<std::uint64_t>> &clusters,
+        const std::vector<std::uint64_t> corner_mask[4],
+        const std::vector<std::array<index_t, 4>> &quads,
+        const std::vector<double> &mus,
+        std::size_t min_group,
+        double *best_d, double *best_t) {
+    *best_d = 0.0;
+    *best_t = 0.0;
+    if (quads.size() != mus.size() || mus.size() < 2 * min_group) return;
+    for (const std::vector<std::uint64_t> &U : clusters) {
+        if (!bits_any(U)) continue;
+        int corner = -1;
+        for (int c = 0; c < 4; ++c) {
+            if (bits_subset(U, corner_mask[c]) && !bits_equal(U, corner_mask[c])) {
+                corner = c;
+                break;
+            }
+        }
+        if (corner < 0) continue;
+        std::size_t n_in = 0, n_out = 0;
+        double s_in = 0.0, s_out = 0.0, q_in = 0.0, q_out = 0.0;
+        for (std::size_t j = 0; j < mus.size(); ++j) {
+            const double v = mus[j];
+            if (bits_test(U, quads[j][corner])) {
+                ++n_in; s_in += v; q_in += v * v;
+            } else {
+                ++n_out; s_out += v; q_out += v * v;
+            }
+        }
+        if (n_in < min_group || n_out < min_group) continue;
+        const double m_in = s_in / (double) n_in, m_out = s_out / (double) n_out;
+        const double v_in = std::max(0.0, q_in / (double) n_in - m_in * m_in)
+                            * (double) n_in / (double) (n_in - 1);
+        const double v_out = std::max(0.0, q_out / (double) n_out - m_out * m_out)
+                             * (double) n_out / (double) (n_out - 1);
+        const double d = m_out - m_in;
+        if (d > *best_d) *best_d = d;
+        // Floor the standard error at one part in a thousand of the margin
+        // scale: two groups that happen to be internally constant would
+        // otherwise give an unbounded t on a handful of 4-sets.
+        const double se = std::sqrt(v_in / (double) n_in + v_out / (double) n_out
+                                    + 1e-6);
+        const double t = d / se;
+        if (t > *best_t) *best_t = t;
+    }
+}
+
+// Per-cluster version of the contrast above: for every cluster of T' that lies
+// properly inside one corner, the gap between the mean per-4-set margin off the
+// cluster and on it, indexed to match `clusters`. A cluster that does not fit
+// inside a corner, or that leaves too few 4-sets on either side, gets -infinity
+// so that no rule built on this can fire there.
+static void per_cluster_margin_gap(
+        const std::vector<std::vector<std::uint64_t>> &clusters,
+        const std::vector<std::uint64_t> corner_mask[4],
+        const std::vector<std::array<index_t, 4>> &quads,
+        const std::vector<double> &mus,
+        std::size_t min_group,
+        std::vector<double> &out) {
+    out.assign(clusters.size(), -std::numeric_limits<double>::infinity());
+    if (quads.size() != mus.size() || mus.size() < 2 * min_group) return;
+    for (std::size_t ui = 0; ui < clusters.size(); ++ui) {
+        const std::vector<std::uint64_t> &U = clusters[ui];
+        if (!bits_any(U)) continue;
+        int corner = -1;
+        for (int c = 0; c < 4; ++c) {
+            if (bits_subset(U, corner_mask[c]) && !bits_equal(U, corner_mask[c])) {
+                corner = c;
+                break;
+            }
+        }
+        if (corner < 0) continue;
+        std::size_t n_in = 0, n_out = 0;
+        double s_in = 0.0, s_out = 0.0;
+        for (std::size_t j = 0; j < mus.size(); ++j) {
+            if (bits_test(U, quads[j][corner])) { ++n_in; s_in += mus[j]; }
+            else { ++n_out; s_out += mus[j]; }
+        }
+        if (n_in < min_group || n_out < min_group) continue;
+        out[ui] = s_out / (double) n_out - s_in / (double) n_in;
+    }
+}
+
+
+
+// P(X >= c) for X ~ Hypergeometric(N draws in total, K of them marked, n of them
+// crossing), i.e. Fisher's exact upper tail for the 2x2 table
+//
+//               contradicts   agrees
+//   crosses U        c        n - c
+//   does not       K - c    N-K-n+c
+//
+// This is the null of BranchCutParams::contrast_alpha: "a contradiction is no
+// more likely on a coordinate crossing U than on any other coordinate of this
+// side". Conditioning on both margins removes the edge's own contradiction rate,
+// which is the nuisance parameter that makes the absolute bar tau fragile on
+// short branches.
+//
+// Evaluated by starting from log pmf(c) and walking up with the exact ratio
+//   pmf(x+1)/pmf(x) = (K-x)(n-x) / ((x+1)(N-K-n+x+1)),
+// so the cost is one lgamma quadruple plus O(tail length) multiplications.
+static double hypergeom_upper_tail(std::size_t N, std::size_t K,
+                                   std::size_t n, std::size_t c) {
+    if (c == 0) return 1.0;
+    if (K > N || n > N) return 1.0;
+    const std::size_t xmax = std::min(n, K);
+    if (c > xmax) return 0.0;
+    // Lower end of the support: x >= n - (N - K).
+    const std::size_t xmin = (n + K > N) ? (n + K - N) : 0;
+    if (c <= xmin) return 1.0;
+    auto lchoose = [](double a, double b) {
+        return std::lgamma(a + 1.0) - std::lgamma(b + 1.0) - std::lgamma(a - b + 1.0);
+    };
+    const double lognorm = lchoose((double) N, (double) n);
+    double term = std::exp(lchoose((double) K, (double) c)
+                           + lchoose((double) (N - K), (double) (n - c))
+                           - lognorm);
+    double total = term;
+    for (std::size_t x = c; x < xmax; ++x) {
+        const double num = (double) (K - x) * (double) (n - x);
+        const double den = (double) (x + 1) * (double) (N - K - n + x + 1);
+        if (den <= 0.0) break;
+        term *= num / den;
+        total += term;
+        if (term < 1e-300) break;
+    }
+    if (total > 1.0) total = 1.0;
+    if (!(total >= 0.0)) total = 0.0;
+    return total;
+}
+
+// The bar a cluster has to clear, once the localised margin gap is allowed to
+// move it. `cluster_margin` splits the clusters into corroborated and not:
+//   corroborated (gap > cluster_margin)         -> the lowered bar `tau_low`
+//   contradicted (gap finite, <= cluster_margin)-> the raised bar `tau_high`
+//   uninformative (too few 4-sets either side)  -> the published bar `tau`
+// The third case matters: a singleton reticulation branch cannot be split
+// against enough 4-sets to have a gap at all, and it must not be penalised for
+// that. Either of `tau_low` / `tau_high` left at 0 falls back to `tau`.
+static inline double cluster_bar(double tau, const BranchCutParams &bc,
+                                 const std::vector<double> &cgap,
+                                 std::size_t ui, std::size_t track) {
+    // Track 0 only. The corroborating quantity is a depressed cross-corner
+    // margin, which is what a FOUR-CYCLE quarnet looks like, so it corroborates
+    // the certificate track (t1/sym) and nothing else. `maj` fires when the
+    // target quartet loses its plurality -- most often a short branch -- so a
+    // cluster it flags is not a reticulation branch and must not inherit the
+    // lowered bar. Same argument as the seed restriction in Alg.
+    // seed-and-propagate.
+    if (track != 0) return tau;
+    if (bc.cluster_margin == 0.0 || ui >= cgap.size()) return tau;
+    const double g = cgap[ui];
+    if (!std::isfinite(g)) return tau;
+    if (g > (double) bc.cluster_margin)
+        return bc.tau_low != 0.0 ? (double) bc.tau_low : tau;
+    return bc.tau_high != 0.0 ? (double) bc.tau_high : tau;
+}
+
 // BranchCutContraction (Algorithm "branch-cut-contraction"): contract the
 // refinement-only edges of T' using fully bad cut certificates.
 //
@@ -2737,6 +2943,56 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
     std::vector<int> seed_of(propagate ? internal.size() : 0, -1);
     std::vector<char> screened(propagate ? internal.size() : 0, 0);
 
+    // The contrast test and the score dump both need every eligible cluster, so
+    // neither can use the "stop at the first firing cluster" short circuit.
+    const bool contrast = branch_cut.contrast_alpha > 0.0;
+    // Number of split-sample corroboration groups; 1 = the published rule.
+    const std::size_t G = (branch_cut.corroborate > 1)
+        ? std::min<std::size_t>((std::size_t) branch_cut.corroborate, 64) : 1;
+    // How many of the Geff groups have to vote to reject. frac = 1 is the
+    // conjunction; smaller values give the two-level majority test.
+    const double corr_frac = (branch_cut.corroborate_frac > 0.0
+                              && branch_cut.corroborate_frac <= 1.0)
+        ? (double) branch_cut.corroborate_frac : 1.0;
+    // The bar one group must clear; defaults to the pooled tau of its track.
+    const double corr_bar_opt = (double) branch_cut.corroborate_bar;
+    auto inner_bar = [&](double tau_t) {
+        return corr_bar_opt > 0.0 ? corr_bar_opt : tau_t;
+    };
+    auto need_groups = [&](std::size_t Ge) -> std::size_t {
+        std::size_t k = (std::size_t) std::ceil(corr_frac * (double) Ge - 1e-9);
+        if (k < 1) k = 1;
+        if (k > Ge) k = Ge;
+        return k;
+    };
+    if (G > 1)
+        std::cout << "branch cut: split-sample corroboration, " << G
+                  << " groups (a cluster must fire in every group)" << std::endl;
+    const bool dumping = !branch_cut.score_out.empty()
+                         || !branch_cut.quad_out.empty();
+    const bool quad_dumping = !branch_cut.quad_out.empty();
+    std::vector<std::vector<std::array<index_t, 4>>> dump_quads(
+        quad_dumping ? internal.size() : 0);
+    std::vector<std::vector<double>> dump_mus(
+        quad_dumping ? internal.size() : 0);
+    const bool collect = contrast || dumping || propagate;
+    // Per-edge record for the offline sweep: one block per (track, side).
+    struct SideRecord {
+        int track, side;
+        std::size_t M_all, C_all;
+        std::vector<std::uint32_t> ui, M, C;
+    };
+    std::vector<std::vector<SideRecord>> dump(dumping ? internal.size() : 0);
+    std::vector<std::array<double, 4>> dump_res(
+        dumping ? internal.size() : 0, {0.0, 0.0, 0.0, 0.0});
+    std::vector<std::array<double, 7>> dump_disp(
+        dumping ? internal.size() : 0, {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    std::vector<std::array<double, 2>> dump_mlc(
+        dumping ? internal.size() : 0, {0.0, 0.0});
+    if (contrast)
+        std::cout << "branch-cut: hypergeometric contrast on, "
+                  << "Bonferroni level " << branch_cut.contrast_alpha << std::endl;
+
     for (std::size_t i = 0; i < internal.size(); ++i) {
         Node *edge = internal[i];
         edge->blob_id = i;
@@ -2756,13 +3012,95 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
         std::vector<index_t> corners[4];
         bool reject = false;
         weight_t worst = 0.0;
+        double best_p = 1.0;
         const std::size_t n_tracks = branch_cut.oracle.tracks.size();
+        // CLUSTER-LEVEL CORROBORATION.
+        //
+        // Threshold work on the cluster statistic alone is finished: every
+        // restriction of it trades about one rescued true edge for three lost
+        // blob edges, because the maximisation over ~2n clusters isolates four
+        // noise contradictions on a true edge as cleanly as it isolates
+        // twenty-two real ones on a blob edge. What the statistic cannot supply
+        // is a SECOND, independent read on the same cluster.
+        //
+        // There is one available. The cycle-cover coordinates and the
+        // cross-corner 4-sets of the resolution test are different query
+        // families, and Lem. reticulation-cut predicts the same cluster for
+        // both: if U is the reticulation branch then the coordinates crossing U
+        // contradict AND the 4-sets whose corner taxon lies in U have depressed
+        // margins. A noise cluster on a true edge has no reason to do the
+        // second. So the bar on the contradiction rate can be lowered to
+        // `tau_low` for clusters whose localised margin gap clears
+        // `cluster_margin`, which is a strict addition to the published rule.
+        std::vector<double> cgap;
+        const bool want_cmargin = branch_cut.cluster_margin != 0.0
+                                  && (branch_cut.tau_low != 0.0
+                                      || branch_cut.tau_high != 0.0);
+        bool cgap_ready = false;
+        // Computed on first demand: only a cluster whose count already sits in
+        // the band between the lowest and highest bar can have its verdict
+        // changed by the gap, and on most edges no cluster gets close, so the
+        // extra cross-corner sample is never drawn.
+        auto ensure_cgap = [&]() {
+            if (cgap_ready) return;
+            cgap_ready = true;
+            std::mt19937_64 cm_rng;
+            std::uint64_t z = (std::uint64_t) branch_cut.seed
+                + 0x9E3779B97F4A7C15ULL * (std::uint64_t) (i + 1)
+                + 0xD6E8FEB86659FD93ULL;
+            z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+            z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+            cm_rng.seed(z ^ (z >> 31));
+            std::mt19937_64 &cdraw = branch_cut.fixed_streams ? cm_rng : rng;
+            double dummy_m = 0.0, dummy_z = 0.0;
+            std::size_t dummy_p = 0;
+            std::vector<double> cm_mus;
+            std::vector<std::array<index_t, 4>> cm_quads;
+            if (!corner_resolution_score(input, corners, branch_cut.samples,
+                                         cdraw, &dummy_m, &dummy_z, &dummy_p,
+                                         &cm_mus, &cm_quads))
+                return;
+            std::vector<std::uint64_t> corner_mask[4];
+            for (int c = 0; c < 4; ++c) {
+                corner_mask[c].assign(nwords, 0);
+                for (index_t t : corners[c])
+                    corner_mask[c][t >> 6] |= (std::uint64_t) 1 << (t & 63);
+            }
+            per_cluster_margin_gap(clusters, corner_mask, cm_quads, cm_mus,
+                                   (std::size_t) branch_cut.mlc_min_group, cgap);
+        };
+        // The lowest bar any cluster can be held to, so the lazy computation
+        // above is only triggered by a cluster that could actually move.
+        double min_bar = 1.0;
+        if (want_cmargin) {
+            min_bar = branch_cut.tau.empty() ? 1.0 : (double) branch_cut.tau[0];
+            if (branch_cut.tau_low != 0.0)
+                min_bar = std::min(min_bar, (double) branch_cut.tau_low);
+        }
         if (display->corner_sets_for_edge(display, edge, corners)) {
-          for (std::size_t track = 0; track < n_tracks && (!reject || propagate); ++track) {
+          for (std::size_t track = 0; track < n_tracks && (!reject || propagate || dumping); ++track) {
             const double tau_t = (double) branch_cut.tau[
                 track < branch_cut.tau.size() ? track : 0];
+            const int mode_t = (track < branch_cut.mode.size())
+                ? branch_cut.mode[track] : 0;
             // Two symmetric sides: pairs from `near`, anchors one per far corner.
-            for (int side = 0; side < 2 && (!reject || propagate); ++side) {
+            for (int side = 0; side < 2 && (!reject || propagate || dumping); ++side) {
+                // One stream per (edge, track, side) when asked for, so that a
+                // flag which changes a decision cannot reshuffle the samples of
+                // every later edge and turn a paired comparison into an unpaired
+                // one. SplitMix-style mixing of the three indices with the seed.
+                std::mt19937_64 local_rng;
+                if (branch_cut.fixed_streams) {
+                    std::uint64_t z = (std::uint64_t) branch_cut.seed
+                        + 0x9E3779B97F4A7C15ULL * (std::uint64_t) (i + 1)
+                        + 0xBF58476D1CE4E5B9ULL * (std::uint64_t)
+                              (branch_cut.shared_coords ? 1 : track + 1)
+                        + 0x94D049BB133111EBULL * (std::uint64_t) (side + 1);
+                    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+                    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+                    local_rng.seed(z ^ (z >> 31));
+                }
+                std::mt19937_64 &draw = branch_cut.fixed_streams ? local_rng : rng;
                 std::vector<index_t> near;
                 const std::vector<index_t> &f1 = corners[side == 0 ? 2 : 0];
                 const std::vector<index_t> &f2 = corners[side == 0 ? 3 : 1];
@@ -2788,6 +3126,10 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                 }
                 std::vector<std::pair<index_t, index_t>> pairs;
                 std::vector<char> bad;
+                // Split-sample corroboration: which group of cycles supplied
+                // each coordinate.  See BranchCutParams::corroborate.
+                std::vector<std::uint8_t> grp;
+                std::size_t Geff = 1;
 
                 if (branch_cut.cycles > 0) {
                     // Lem. cycle-cover: h edge-disjoint spanning cycles, one per
@@ -2801,13 +3143,58 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                     // Availability (Lem. cycle-cover): h <= t*floor((r-1)/2),
                     // and for r == 2 a spanning 2-cycle needs 2h <= t. Taking
                     // one cycle per anchor pair needs only h <= t_A.
-                    const std::size_t h_max = (m == 2)
-                        ? (std::size_t) (t_A / 2)
-                        : (std::size_t) std::min<std::uint64_t>(
-                              t_A, t_A * ((m - 1) / 2));
+                    // The one-cycle-per-anchor-pair construction caps h at t_A,
+                    // and t_A = |B1||B2| is TINY for an edge whose far corners
+                    // are small -- a far cherry gives t_A = 1, so `h` collapses
+                    // to 1 however large --branchcut-cycles is set. That cap,
+                    // not any statistical saturation, is why h = 64 and h = 200
+                    // measured the same as h = 32: for the edges that needed
+                    // more depth the extra cycles were never drawn.
+                    //
+                    // Lem. cycle-cover itself allows h <= t_A * floor((m-1)/2),
+                    // because K_m carries floor((m-1)/2) edge-disjoint spanning
+                    // cycles (Walecki) inside EACH parallel class. `cycle_reuse`
+                    // lifts the cap to that bound and takes the extra cycles as
+                    // fresh random vertex orders rather than a Walecki
+                    // decomposition; those are edge-disjoint only in
+                    // expectation, so a coordinate that repeats one already
+                    // drawn on this side is dropped instead of being counted
+                    // twice (a repeat is the SAME 4-set, so the oracle returns
+                    // the same answer and counting it twice would inflate M_U
+                    // with no new information). Every cycle still crosses every
+                    // cluster at least twice before de-duplication.
+                    // Lem. cycle-cover's own availability bound; the
+                    // one-cycle-per-anchor construction stops at t_A.
+                    const std::uint64_t h_avail = (m == 2)
+                        ? (t_A / 2)
+                        : std::min<std::uint64_t>(
+                              t_A * std::max<std::uint64_t>(1, (m - 1) / 2),
+                              (std::uint64_t) 1 << 32);
+                    std::size_t h_max = (std::size_t) (branch_cut.cycle_reuse
+                        ? h_avail
+                        : ((m == 2) ? (t_A / 2)
+                                    : std::min<std::uint64_t>(t_A, t_A * ((m - 1) / 2))));
+                    // Targeted lift: give a THIN edge just enough depth to leave
+                    // the first-order regime of Prop. count-floor, without
+                    // paying for the full `cycles`. Never lowers h_max.
+                    if (branch_cut.min_depth > 0) {
+                        const std::size_t want =
+                            std::min<std::uint64_t>(branch_cut.min_depth, h_avail);
+                        if (want > h_max) h_max = want;
+                    }
                     if (h > h_max) h = h_max;
                     pairs.reserve(h * m);
                     bad.reserve(h * m);
+                    // Only as many groups as there are cycles to split: an edge
+                    // whose far corners are a cherry has t_A = 1, hence h = 1,
+                    // and asking two groups of it would make the certificate
+                    // uncorroborable and the edge unrejectable.
+                    if (G > 1) { grp.reserve(h * m); Geff = std::min(G, h); }
+                    std::unordered_set<std::uint64_t> seen;
+                    const bool dedup = (branch_cut.cycle_reuse
+                                        || branch_cut.min_depth > 0)
+                                       && (std::uint64_t) h > t_A;
+                    if (dedup) seen.reserve(h * m * 2);
                     std::vector<std::size_t> order(m);
                     for (std::size_t i = 0; i < m; ++i) order[i] = i;
                     for (std::size_t c = 0; c < h; ++c) {
@@ -2817,25 +3204,34 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                         // Vertex order drawn before any query (Ass. protocol).
                         for (std::size_t i = m; i > 1; --i) {
                             std::uniform_int_distribution<std::size_t> d(0, i - 1);
-                            std::swap(order[i - 1], order[d(rng)]);
+                            std::swap(order[i - 1], order[d(draw)]);
                         }
                         for (std::size_t i = 0; i < m; ++i) {
                             const index_t x = near[order[i]];
                             const index_t y = near[order[(i + 1) % m]];
                             if (m == 2 && i == 1) break;   // avoid the duplicate edge
+                            if (dedup) {
+                                const std::uint64_t lo = std::min(x, y), hi = std::max(x, y);
+                                const std::uint64_t key = (((std::uint64_t) f1i) << 48)
+                                    ^ (((std::uint64_t) f2i) << 32) ^ (lo << 16) ^ hi;
+                                if (!seen.insert(key).second) continue;
+                            }
                             const bool agree = query_pairs_together(
                                 input, x, y, f1[f1i], f2[f2i], branch_cut.oracle, track);
                             pairs.push_back(std::make_pair(x, y));
                             bad.push_back(agree ? 0 : 1);
+                            if (Geff > 1)
+                                grp.push_back((std::uint8_t) (c % Geff));
                         }
                     }
                 } else {
                 std::vector<std::uint64_t> picks;
-                corner_row_sample_indices(population, want, rng, picks);
+                corner_row_sample_indices(population, want, draw, picks);
 
                 // Decode each sampled coordinate, query it, and record the pair.
                 pairs.reserve(picks.size());
                 bad.reserve(picks.size());
+                if (G > 1) { grp.reserve(picks.size()); Geff = G; }
                 for (std::uint64_t code : picks) {
                     const std::uint64_t f2i = code % f2.size();
                     code /= f2.size();
@@ -2850,6 +3246,8 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                         input, x, y, f1[f1i], f2[f2i], branch_cut.oracle, track);
                     pairs.push_back(std::make_pair(x, y));
                     bad.push_back(agree ? 0 : 1);
+                    if (Geff > 1)
+                        grp.push_back((std::uint8_t) ((pairs.size() - 1) % Geff));
                 }
                 }
 
@@ -2861,19 +3259,91 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                     evidence[i].push_back(ev);
                 }
 
+                // Side totals: the conditioning margins of the contrast test,
+                // and the statistic of a `global` track.
+                std::size_t M_all = pairs.size(), C_all = 0;
+                for (char b : bad) C_all += (std::size_t) (b ? 1 : 0);
+
+                if (mode_t == 1) {
+                    // GLOBAL track. `maj` asks whether the target quartet keeps
+                    // its plurality, which is a property of the edge and not of
+                    // any cluster, so localising it only adds the maximisation
+                    // penalty. One rate test on the whole side instead.
+                    if (M_all >= (std::size_t) branch_cut.min_support) {
+                        const weight_t rate = (weight_t) C_all / (weight_t) M_all;
+                        if (rate > worst) worst = rate;
+                        const std::size_t Ct = (C_all > (std::size_t) branch_cut.trim)
+                            ? C_all - (std::size_t) branch_cut.trim : 0;
+                        bool fires_g = (double) Ct > tau_t * (double) M_all;
+                        // A global track has no cluster to corroborate, so the
+                        // side total itself has to hold up in every group.
+                        if (fires_g && Geff > 1) {
+                            std::vector<std::uint32_t> Mg(Geff, 0), Cg(Geff, 0);
+                            for (std::size_t j = 0; j < bad.size(); ++j) {
+                                ++Mg[grp[j]]; Cg[grp[j]] += (std::uint32_t) bad[j];
+                            }
+                            const double ib = inner_bar(tau_t);
+                            std::size_t voted = 0;
+                            for (std::size_t g = 0; g < Geff; ++g)
+                                if (Mg[g] > 0
+                                    && (double) Cg[g] > ib * (double) Mg[g]) ++voted;
+                            fires_g = voted >= need_groups(Geff);
+                        }
+                        if (fires_g) reject = true;
+                    }
+                    if (dumping) {
+                        SideRecord rec;
+                        rec.track = (int) track; rec.side = side;
+                        rec.M_all = M_all; rec.C_all = C_all;
+                        dump[i].push_back(rec);
+                    }
+                    continue;
+                }
+
+                // Cluster scan. When the contrast test or the dump is on the
+                // first firing cluster cannot settle the edge, because the
+                // Bonferroni factor needs the number of eligible clusters and
+                // the dump needs all of them; so gather first, decide after.
+                std::vector<std::uint32_t> cl_ui, cl_M, cl_C;
+                std::vector<char> cl_cor;   // corroborated in every group?
                 for (std::size_t ui = 0; ui < clusters.size(); ++ui) {
                     const std::vector<std::uint64_t> &U = clusters[ui];
                     if (!bits_any(U) || !bits_subset(U, nearmask)) continue;
                     if (bits_equal(U, nearmask)) continue;   // U must be proper
                     std::size_t M = 0, C = 0;
+                    std::uint32_t Mg[64], Cg[64];
+                    if (Geff > 1)
+                        for (std::size_t g = 0; g < Geff; ++g) { Mg[g] = 0; Cg[g] = 0; }
                     for (std::size_t j = 0; j < pairs.size(); ++j) {
                         const bool in_x = bits_test(U, pairs[j].first);
                         const bool in_y = bits_test(U, pairs[j].second);
                         if (in_x == in_y) continue;          // does not cross U
                         ++M;
                         C += bad[j];
+                        if (Geff > 1) {
+                            const std::size_t g = grp[j];
+                            ++Mg[g]; Cg[g] += (std::uint32_t) bad[j];
+                        }
                     }
                     if (M < (std::size_t) branch_cut.min_support) continue;
+                    if (collect) {
+                        cl_ui.push_back((std::uint32_t) ui);
+                        cl_M.push_back((std::uint32_t) M);
+                        cl_C.push_back((std::uint32_t) C);
+                        if (Geff > 1) {
+                            const double ib = inner_bar(tau_t);
+                            std::size_t voted = 0;
+                            for (std::size_t g = 0; g < Geff; ++g)
+                                if (Mg[g] > 0
+                                    && (double) Cg[g] > ib * (double) Mg[g]) ++voted;
+                            cl_cor.push_back(voted >= need_groups(Geff) ? 1 : 0);
+                        }
+                        continue;
+                    }
+                    // Trimmed statistic: drop up to `trim` contradicting
+                    // coordinates before comparing with the threshold.
+                    const std::size_t Ct = (C > (std::size_t) branch_cut.trim)
+                        ? C - (std::size_t) branch_cut.trim : 0;
                     const weight_t rate = (weight_t) C / (weight_t) M;
                     if (rate > worst) {
                         worst = rate;
@@ -2891,12 +3361,67 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                         // sensitivity with no certificate behind it.
                         if (propagate && track == 0) seed_of[i] = (int) ui;
                     }
-                    if ((double) C > tau_t * (double) M) {
+                    if (want_cmargin && track == 0
+                        && (double) Ct > min_bar * (double) M) ensure_cgap();
+                    const double bar_u =
+                        cluster_bar(tau_t, branch_cut, cgap, ui, track);
+                    bool fires = (double) Ct > bar_u * (double) M
+                                 && C >= (std::size_t) branch_cut.cmin;
+                    // Corroboration: the SAME cluster must clear the bar in
+                    // every group of cycles, not just in the pooled count.
+                    if (fires && Geff > 1) {
+                        const double ib = inner_bar(bar_u);
+                        std::size_t voted = 0;
+                        for (std::size_t g = 0; g < Geff; ++g)
+                            if (Mg[g] > 0
+                                && (double) Cg[g] > ib * (double) Mg[g]) ++voted;
+                        fires = voted >= need_groups(Geff);
+                    }
+                    if (fires) {
                         reject = true;
                         // Without propagation the first firing cluster settles
                         // the edge; with it, keep scanning so the seed is the
                         // argmax rather than whichever cluster happened first.
                         if (!propagate) break;
+                    }
+                }
+
+                if (collect) {
+                    const std::size_t n_elig = cl_ui.size();
+                    for (std::size_t q = 0; q < n_elig; ++q) {
+                        const std::size_t M = cl_M[q], C = cl_C[q];
+                        const weight_t rate = (weight_t) C / (weight_t) M;
+                        if (rate > worst) {
+                            worst = rate;
+                            if (propagate && track == 0) seed_of[i] = (int) cl_ui[q];
+                        }
+                        const std::size_t Ct = (C > (std::size_t) branch_cut.trim)
+                            ? C - (std::size_t) branch_cut.trim : 0;
+                        if (want_cmargin && track == 0
+                            && (double) Ct > min_bar * (double) M) ensure_cgap();
+                        if (!((double) Ct >
+                              cluster_bar(tau_t, branch_cut, cgap, cl_ui[q], track)
+                              * (double) M)) continue;
+                        if (C < (std::size_t) branch_cut.cmin) continue;
+                        if (Geff > 1 && q < cl_cor.size() && !cl_cor[q]) continue;
+                        if (contrast) {
+                            // Fisher's exact upper tail against the side's own
+                            // contradiction rate, Bonferroni-adjusted over the
+                            // clusters this edge maximised over.
+                            double p = hypergeom_upper_tail(M_all, C_all, M, C)
+                                       * (double) (n_elig ? n_elig : 1);
+                            if (p > 1.0) p = 1.0;
+                            if (p < best_p) best_p = p;
+                            if (!(p < (double) branch_cut.contrast_alpha)) continue;
+                        }
+                        reject = true;
+                    }
+                    if (dumping) {
+                        SideRecord rec;
+                        rec.track = (int) track; rec.side = side;
+                        rec.M_all = M_all; rec.C_all = C_all;
+                        rec.ui = cl_ui; rec.M = cl_M; rec.C = cl_C;
+                        dump[i].push_back(rec);
                     }
                 }
             }
@@ -2908,13 +3433,80 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
         // certificate cannot see because they are not blobs at all.
         double res_z = std::numeric_limits<double>::infinity();
         double res_margin = std::numeric_limits<double>::infinity();
-        if (!reject
-            && (branch_cut.resolution_z != 0.0 || branch_cut.resolution_margin != 0.0)) {
+        const bool want_res = (branch_cut.resolution_z != 0.0
+                               || branch_cut.resolution_margin != 0.0);
+        // min, q10, q25, median, mean, sd, count of the per-4-set margins.
+        std::array<double, 7> disp = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+        double mlc_d = 0.0, mlc_t = 0.0;
+        const bool want_mlc = dumping || branch_cut.mlc_d != 0.0
+                              || branch_cut.mlc_t != 0.0;
+        const bool want_disp = dumping || branch_cut.margin_q10 != 0.0
+                               || branch_cut.margin_sd != 0.0
+                               || branch_cut.margin_min != 0.0 || want_mlc;
+        // The dump wants the margin for every edge, including the ones the
+        // cluster rule already rejected -- but only when the streams are fixed,
+        // since under the shared stream an extra draw would shift every later
+        // edge and the dump would no longer describe the run that produced it.
+        const bool force_res = dumping && branch_cut.fixed_streams;
+        if ((!reject && (want_res || want_disp)) || force_res) {
             // `rng` is shared with the cluster sampling above, so this call must
             // stay in the same place and draw the same number of values as the
             // block it replaced, or every --branchcut-blob result shifts.
-            if (corner_resolution_score(input, corners, branch_cut.samples, rng,
-                                        &res_margin, &res_z, nullptr)) {
+            std::mt19937_64 res_local;
+            if (branch_cut.fixed_streams) {
+                std::uint64_t z = (std::uint64_t) branch_cut.seed
+                    + 0x9E3779B97F4A7C15ULL * (std::uint64_t) (i + 1)
+                    + 0xD6E8FEB86659FD93ULL;
+                z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+                z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+                res_local.seed(z ^ (z >> 31));
+            }
+            std::mt19937_64 &rdraw = branch_cut.fixed_streams ? res_local : rng;
+            std::size_t res_pooled = 0;
+            std::vector<double> mus;
+            std::vector<std::array<index_t, 4>> quads;
+            const bool ok = corner_resolution_score(input, corners,
+                                                    branch_cut.samples, rdraw,
+                                                    &res_margin, &res_z, &res_pooled,
+                                                    want_disp ? &mus : nullptr,
+                                                    want_mlc ? &quads : nullptr);
+            if (want_mlc && !quads.empty()) {
+                std::vector<std::uint64_t> corner_mask[4];
+                for (int c = 0; c < 4; ++c) {
+                    corner_mask[c].assign(nwords, 0);
+                    for (index_t t : corners[c])
+                        corner_mask[c][t >> 6] |= (std::uint64_t) 1 << (t & 63);
+                }
+                localised_margin_contrast(clusters, corner_mask, quads, mus,
+                                          (std::size_t) branch_cut.mlc_min_group,
+                                          &mlc_d, &mlc_t);
+            }
+            if (want_disp && mus.size() >= 2) {
+                std::vector<double> srt(mus);
+                std::sort(srt.begin(), srt.end());
+                const std::size_t k = srt.size();
+                double mean = 0.0;
+                for (double v : srt) mean += v;
+                mean /= (double) k;
+                double var = 0.0;
+                for (double v : srt) var += (v - mean) * (v - mean);
+                var /= (double) (k - 1);
+                disp[0] = srt[0];                                   // min
+                disp[1] = srt[(std::size_t) (0.10 * (k - 1))];      // q10
+                disp[2] = srt[(std::size_t) (0.25 * (k - 1))];      // q25
+                disp[3] = srt[k / 2];                               // median
+                disp[4] = mean;
+                disp[5] = std::sqrt(var);                           // sd
+                disp[6] = (double) k;
+            }
+            if (dumping) {
+                dump_res[i] = {ok ? 1.0 : 0.0, res_margin, res_z, (double) res_pooled};
+                dump_disp[i] = disp;
+                dump_mlc[i] = {mlc_d, mlc_t};
+                if (quad_dumping) { dump_quads[i] = quads; dump_mus[i] = mus; }
+            }
+            if (!reject && want_res && ok
+                && res_pooled >= (std::size_t) branch_cut.resolution_min_pooled) {
                 if (branch_cut.resolution_margin != 0.0
                     && res_margin < (double) branch_cut.resolution_margin)
                     reject = true;
@@ -2922,11 +3514,27 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                     && res_z < (double) branch_cut.resolution_z)
                     reject = true;
             }
+            // Dispersion rules. Applied only to an edge the cluster certificate
+            // and the pooled margin both accepted, so they are a strict
+            // addition aimed at the blob edges those two cannot see.
+            if (!reject && disp[6] >= (double) branch_cut.margin_min_sets) {
+                if (branch_cut.margin_q10 != 0.0
+                    && disp[1] < (double) branch_cut.margin_q10) reject = true;
+                if (branch_cut.margin_sd != 0.0
+                    && disp[5] > (double) branch_cut.margin_sd) reject = true;
+                if (branch_cut.margin_min != 0.0
+                    && disp[0] < (double) branch_cut.margin_min) reject = true;
+                if (branch_cut.mlc_d != 0.0
+                    && mlc_d > (double) branch_cut.mlc_d) reject = true;
+                if (branch_cut.mlc_t != 0.0
+                    && mlc_t > (double) branch_cut.mlc_t) reject = true;
+            }
         }
 
         std::cout << "branch-cut: " << (reject ? "REJECT" : "ACCEPT")
-                  << " (best cluster rate " << worst
-                  << ", resolution margin " << res_margin << ")" << std::endl;
+                  << " (best cluster rate " << worst;
+        if (contrast) std::cout << ", best contrast p " << best_p;
+        std::cout << ", resolution margin " << res_margin << ")" << std::endl;
         if (propagate) screened[i] = reject ? 1 : 0;
         if (reject) false_positive.insert(edge);
         edge->min_pvalue = reject ? 0.0 : 1.0;
@@ -2980,7 +3588,9 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                         C += ev.bad[j];
                     }
                     if (M < (std::size_t) branch_cut.min_support) continue;
-                    if ((double) C > tau2 * (double) M) { reject = true; break; }
+                    const std::size_t Ct = (C > (std::size_t) branch_cut.trim)
+                        ? C - (std::size_t) branch_cut.trim : 0;
+                    if ((double) Ct > tau2 * (double) M) { reject = true; break; }
                 }
                 if (reject) break;
             }
@@ -2993,6 +3603,80 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
         std::cout << "propagation: " << seeds.size() << " seed cluster(s), "
                   << promoted << " further edge(s) contracted at tau2 = "
                   << tau2 << std::endl;
+    }
+
+    // Per-edge sufficient statistics, so a whole multi-dimensional threshold
+    // sweep (tau, min support, trim, contrast level, resolution margin, per
+    // track and per side) costs one run per replicate rather than one run per
+    // point. Written after every decision, so it cannot affect any of them.
+    if (dumping) {
+        std::ofstream fout(branch_cut.score_out);
+        if (fout.fail()) {
+            std::cout << "\nERROR: Unable to write to " << branch_cut.score_out
+                      << std::endl;
+            exit(1);
+        }
+        fout << "edge_id\tisfake\trejected\tres_ok\tres_margin\tres_z"
+                "\tres_pooled\tm_min\tm_q10\tm_q25\tm_med\tm_mean\tm_sd"
+                "\tm_n\tmlc_d\tmlc_t\tevidence\tside\n";
+        for (std::size_t i = 0; i < internal.size(); ++i) {
+            Node *edge = internal[i];
+            fout << i << "\t" << (edge->isfake ? 1 : 0) << "\t"
+                 << (false_positive.count(edge) ? 1 : 0) << "\t";
+            if (dump_res[i][0] != 0.0)
+                fout << 1 << "\t" << dump_res[i][1] << "\t" << dump_res[i][2]
+                     << "\t" << (std::size_t) dump_res[i][3];
+            else
+                fout << 0 << "\tNA\tNA\t0";
+            for (std::size_t q = 0; q < 6; ++q) fout << "\t" << dump_disp[i][q];
+            fout << "\t" << (std::size_t) dump_disp[i][6];
+            fout << "\t" << dump_mlc[i][0] << "\t" << dump_mlc[i][1];
+            fout << "\t";
+            // evidence := block '|' block, block := track:side:M_all:C_all:list
+            //             list  := ui,M,C ';' ui,M,C ...
+            if (dump[i].empty()) fout << "NA";
+            for (std::size_t b = 0; b < dump[i].size(); ++b) {
+                const SideRecord &r = dump[i][b];
+                if (b) fout << "|";
+                fout << r.track << ":" << r.side << ":" << r.M_all << ":"
+                     << r.C_all << ":";
+                for (std::size_t q = 0; q < r.ui.size(); ++q)
+                    fout << (q ? ";" : "") << r.ui[q] << "," << r.M[q] << ","
+                         << r.C[q];
+            }
+            fout << "\t";
+            std::vector<index_t> A, B;
+            for (Node *leaf : bips[i].first) A.push_back(leaf->index);
+            for (Node *leaf : bips[i].second) B.push_back(leaf->index);
+            const std::vector<index_t> &sd = (A.size() <= B.size()) ? A : B;
+            for (std::size_t j = 0; j < sd.size(); ++j)
+                fout << (j ? "," : "") << dict->index2label(sd[j]);
+            fout << "\n";
+        }
+        fout.close();
+        std::cout << "Wrote per-edge branch-cut evidence to "
+                  << branch_cut.score_out << std::endl;
+    }
+
+    if (quad_dumping) {
+        std::ofstream fout(branch_cut.quad_out);
+        if (fout.fail()) {
+            std::cout << "\nERROR: Unable to write to " << branch_cut.quad_out
+                      << std::endl;
+            exit(1);
+        }
+        fout << "edge_id\ta1\ta2\tb1\tb2\tmu\n";
+        for (std::size_t i = 0; i < internal.size(); ++i)
+            for (std::size_t j = 0; j < dump_mus[i].size(); ++j)
+                fout << i << "\t"
+                     << dict->index2label(dump_quads[i][j][0]) << "\t"
+                     << dict->index2label(dump_quads[i][j][1]) << "\t"
+                     << dict->index2label(dump_quads[i][j][2]) << "\t"
+                     << dict->index2label(dump_quads[i][j][3]) << "\t"
+                     << dump_mus[i][j] << "\n";
+        fout.close();
+        std::cout << "Wrote per-4-set margins to " << branch_cut.quad_out
+                  << std::endl;
     }
 
     if (display->root->children.size() == 2)

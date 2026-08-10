@@ -9,6 +9,7 @@
 #include <vector>
 #include <cstdint>
 #include <random>
+#include <array>
 
 class QCFWriter;
 
@@ -364,6 +365,48 @@ struct BranchCutParams {
     // Budget is h*|side| coordinates per side, so `--branchcut-cycles h` is
     // budget-matched to `--branchcut-samples h`.
     unsigned long int cycles;
+    // Lift the h <= t_A cap of the one-cycle-per-anchor-pair construction to
+    // Lem. cycle-cover's own bound h <= t_A * floor((|A|-1)/2), taking the extra
+    // cycles per parallel class as fresh random vertex orders with repeated
+    // coordinates dropped. See the note in the constructor: the cap, not
+    // saturation, is what made h = 64 and h = 200 indistinguishable from h = 32,
+    // because for a far cherry t_A = 1.
+    bool cycle_reuse;
+    // Minimum depth to lift a THIN edge to, using the same extra-cycle
+    // mechanism as `cycle_reuse` but stopping as soon as the count floor is
+    // cleared instead of going all the way to `cycles`.
+    //
+    // Prop. count-floor: a cluster crossed by m coordinates fires on a single
+    // erroneous answer exactly when m < 1/tau, and Lem. cycle-cover gives
+    // m >= 2h, so h >= 1/(2 tau) leaves the first-order regime -- at tau = 0.15
+    // that is h >= 4. The obstruction is availability, not budget: taking one
+    // cycle per anchor pair caps h at t_A = |B1||B2|, and a far cherry gives
+    // t_A = 1. `cycle_reuse` lifts the cap to Lem. cycle-cover's own bound and
+    // then draws the full `cycles`, which costs 2.4x wall clock; this lifts it
+    // only to `min_depth`, which is all the proposition asks for.
+    // 0 = off.
+    unsigned long int min_depth;
+    // Additive slack on the cluster rule: reject only when C_U > tau*M_U + trim.
+    // For a BINARY indicator this is exactly the "drop the top-b contradictors"
+    // trimmed statistic proposed in the earliest notes and never built.
+    //
+    // It is nearly free for branch cut specifically, because branch cut's
+    // certificate is FULL density: Lem. reticulation-cut makes every coordinate
+    // crossing the reticulation branch a contradiction, so on a collapsed edge
+    // C_L ~ delta_1 * M_L = 0.673 * 2h, which at h = 32, tau = 0.15 is 43
+    // against a threshold of 9.6 -- headroom of 33. Corner row's half-full row
+    // (Lem. half-full-corner-row) only reaches 0.5 * delta_1 * k, headroom 12,
+    // so the same trim is far riskier there.
+    //
+    // Meanwhile a falsely rejected true edge sits *just* above the threshold --
+    // that is what makes it marginal -- so a small trim removes it. This targets
+    // fn_test, the error term that grows fastest with n.
+    unsigned long int trim;
+    // Minimum pooled cross-corner 4-sets before the resolution margin may fire.
+    // The margin is a ratio of pooled gene-tree counts; an edge whose corners are
+    // tiny (a corner can be a single taxon) pools very few 4-sets and gets a
+    // noisy margin, which costs sensitivity for no detection. 0 = no guard.
+    unsigned long int resolution_min_pooled;
     // Edge-level test aimed at the OTHER half of N. A blob-internal edge is
     // compatible with T and needs four-cycle signal; an ASTRAL-error edge
     // *conflicts* with T, so some 4-set's perfect answer is a resolved quartet
@@ -397,6 +440,31 @@ struct BranchCutParams {
     // against 0.978 held out), so the signal is one-dimensional.
     weight_t resolution_z;
     weight_t resolution_margin;
+    // DISPERSION of the per-4-set cross-corner margins, as opposed to the
+    // pooled location statistic above. Predicted by Lem. branch-restriction:
+    //   retained    -- every cross-corner 4-set has w0 as its perfect answer,
+    //                  so the margins are uniformly HIGH;
+    //   ASTRAL error-- the split conflicts with T throughout, uniformly LOW;
+    //   blob-internal - only the 4-sets meeting four distinct branches at the
+    //                  blob vertex are affected, so the margins are a MIXTURE:
+    //                  high variance and a low lower tail, with a mean that can
+    //                  sit anywhere. Pooling averages the components together
+    //                  and is blind to it, which is why the contradiction test
+    //                  and the pooled margin both miss the "silent" blob edges.
+    // Off by default (0). Reject when q10(mu) < margin_q10, when sd(mu) >
+    // margin_sd, or when min(mu) < margin_min, whichever are set.
+    weight_t margin_q10, margin_sd, margin_min;
+    unsigned long int margin_min_sets;   // guard: need this many 4-sets
+    // Localised margin contrast (see the note above the helper of that name):
+    // the largest gap, over clusters of T' lying properly inside one corner,
+    // between the mean per-4-set margin outside the cluster and inside it.
+    // `mlc_d` thresholds the raw gap, `mlc_t` its Welch t. 0 = off.
+    weight_t mlc_d, mlc_t;
+    // Cluster-level corroboration: a cluster whose localised margin gap exceeds
+    // `cluster_margin` may fire at the lowered contradiction bar `tau_low`
+    // instead of `tau`. Both 0 = off, which is the published rule exactly.
+    weight_t cluster_margin, tau_low, tau_high;
+    unsigned long int mlc_min_group;     // 4-sets needed on each side of U
     // Seed-and-propagate (theory.tex Alg. seed-and-propagate), 0 = off.
     // Phase 1 scores an edge by the MAXIMUM over ~2n clusters, so its null is
     // inflated by the maximisation. Lem. propagation says a retained edge gives
@@ -408,6 +476,130 @@ struct BranchCutParams {
     // at this threshold. Because a fixed cluster's rate never exceeds the max,
     // it can only fire where propagate_tau < rate <= tau -- a strict addition.
     weight_t propagate_tau;
+    // ---- added 2026-08-08, every one default-inert ---------------------
+    //
+    // CONTRAST test. The published rule compares the crossing contradiction
+    // rate C_U/M_U with an absolute bar tau. That bar has to serve two jobs at
+    // once: it must sit above the oracle's error rate delta_0 and below the
+    // certificate's density delta_1. The trouble is that delta_0 is not a
+    // constant of the run -- on a SHORT branch the local violation rate is far
+    // above the global 0.0005, which is exactly where branch cut's false
+    // rejections live (the h = 8 -> 32 experiment showed they are noise-limited,
+    // not threshold-limited, so no choice of tau and no trim reaches them).
+    //
+    // But a short retained branch raises the contradiction rate UNIFORMLY over
+    // the side's coordinates, while Lem. reticulation-cut says a collapsed edge
+    // raises it only on the coordinates that CROSS the reticulation branch:
+    // a coordinate whose near pair lies wholly inside U, or wholly outside it,
+    // never meets four distinct branches at the blob vertex and so has a tree
+    // quarnet. The informative quantity is therefore not the level of C_U/M_U
+    // but its CONTRAST against the same edge's off-cluster rate.
+    //
+    // Conditioning on the side's total contradiction count removes the unknown
+    // local rate entirely: under the null "contradiction is independent of
+    // crossing U", C_U ~ Hypergeometric(M_all, C_all, M_U), which is Fisher's
+    // exact test and needs no estimate of delta_0. Reject when that upper tail,
+    // Bonferroni-adjusted over the eligible clusters (the rule maximises over
+    // ~2n of them), falls below this level. 0 = off.
+    //
+    // It also makes the bar size-adaptive for free: at equal rate a cluster with
+    // M_U = 2h is far less significant than one with M_U = h|A|/2, which the
+    // fixed tau treats identically.
+    weight_t contrast_alpha;
+    // Per-track rule. 0 = the cluster scan above; 1 = a single GLOBAL rate test
+    // on the whole side, with no maximisation over clusters.
+    //
+    // Why a track would want this: the cluster scan is the right shape for a
+    // certificate track (t1/sym), whose signal is localised on the reticulation
+    // branch. It is the wrong shape for `maj`, which fires when the target
+    // quartet loses its plurality -- a property of the edge, not of any cluster.
+    // Running `maj` through a max over ~2n clusters of M_U ~ 2h coordinates
+    // gives it the maximisation penalty with none of the localisation benefit.
+    // Empty = every track uses the cluster scan, i.e. the original behaviour.
+    std::vector<int> mode;
+    // One independent RNG stream per (edge, track, side) instead of a single
+    // stream consumed in scan order. The early exits mean a decision taken by
+    // track 0 skips track 1's draws, so under the shared stream ANY flag that
+    // changes a decision also reshuffles every later sample; two configurations
+    // are then compared on different query sets. With fixed streams the
+    // coordinates an edge is tested on depend only on the seed, so paired
+    // comparisons isolate the rule being changed. Off reproduces earlier runs.
+    bool fixed_streams;
+    // Draw the cycle-cover coordinates once per (edge, side) and evaluate EVERY
+    // oracle track on the same 4-sets, instead of giving each track its own
+    // sample. The qCF cache is keyed by 4-set, so the second track's queries
+    // become cache hits and the wall clock of a two-track spec drops towards
+    // that of one track. Requires fixed_streams (there is no other way to make
+    // two tracks draw the same stream when the first may exit early).
+    bool shared_coords;
+    // Per-edge sufficient statistics for offline threshold sweeps: every
+    // eligible cluster's (M_U, C_U) together with the side totals, so tau,
+    // min_support, trim, the contrast level and the resolution margin can all
+    // be swept from one run per replicate. Costs no queries.
+    std::string score_out;
+    // Every sampled cross-corner 4-set with its margin, as
+    // edge_id, a1, a2, b1, b2, mu. The four corner taxa locate the 4-set inside
+    // the corner structure, so ANY margin statistic -- dispersion, a
+    // cluster-localised contrast, a per-taxon analysis of variance -- can be
+    // built and compared offline from one run instead of one run per statistic.
+    std::string quad_out;
+    // SPLIT-SAMPLE CORROBORATION. Partition the h spanning cycles into g groups
+    // by cycle index mod g and require the SAME cluster to fire in EVERY group
+    // before the edge is rejected. 0 or 1 = off (the published rule).
+    //
+    // Why the same cluster and not the same edge. Lem. reticulation-cut says a
+    // collapsed edge has ONE distinguished cluster -- the reticulation branch --
+    // on which the contradiction density is delta_1 for every coordinate that
+    // crosses it. That density does not depend on which cycles supplied the
+    // coordinates, so a true certificate fires in every group. A false rejection
+    // instead comes from the maximisation over ~2n clusters finding a cluster
+    // whose few crossing coordinates happen to contradict; the argmax cluster is
+    // then a property of the draw, and there is no reason for the SAME cluster to
+    // be extreme in an independent group of cycles.
+    //
+    // It costs no queries: the h cycles are drawn and queried exactly as before,
+    // only the counting is stratified. Since a spanning cycle crosses every
+    // nonempty proper subset at least twice, every group still has
+    // M_U^(j) >= 2*floor(h/g) deterministically, so Thm. cycle-cover-global
+    // applies inside each group at depth h/g and completeness survives with a
+    // union bound over the g groups; the false-rejection probability is a
+    // product over g nearly independent draws.
+    unsigned long int corroborate;
+    // Fraction of the g groups that must fire, in (0, 1]. 1 = all of them (the
+    // conjunction). Values below 1 give the two-level majority test that
+    // Assumption anchor-blocked dependence calls for: each group is one anchor
+    // stratum, a stratum votes by its own threshold rule at `tau`, and the edge
+    // is rejected when more than `corroborate_frac` of the strata vote to.
+    // Under blocked dependence the effective sample size is the number of
+    // STRATA, not the number of coordinates, so the outer vote is the one whose
+    // Chernoff bound is valid.
+    weight_t corroborate_frac;
+    // Inner bar a single group must clear, when corroborating. 0 = use `tau`.
+    //
+    // Requiring every group to clear the SAME tau as the pooled count is
+    // strictly stricter than the pooled rule, so it can only cost detections.
+    // The loss is concentrated on collapsed edges whose certificate is genuine
+    // but thin: with M_U ~ 2h/g per group, a reticulation branch at the
+    // measured delta_1 = 0.673 clears tau = 0.15 comfortably in expectation but
+    // fluctuates below it in one group often enough to matter. A LOWER inner
+    // bar keeps the corroboration requirement -- the same cluster must look bad
+    // in both halves -- while asking less of each half, which is the right
+    // shape: what distinguishes a draw-driven cluster from a certificate is
+    // whether the second half sees ANY excess, not whether it independently
+    // reaches the pooled threshold.
+    weight_t corroborate_bar;
+    // Absolute floor on a cluster's contradiction count: reject only when
+    // C_U >= cmin as well as C_U > tau*M_U. 0 = off.
+    //
+    // The cycle cover guarantees M_U >= 2h for every cluster, so at h = 32 the
+    // bar tau*M_U = 9.6 already demands ten contradictions and `cmin` is inert.
+    // It binds exactly where the guarantee does not: h is capped at
+    // t_A = |B1||B2|, so an edge whose far corners are a cherry has t_A = 1,
+    // h collapses to 1, and M_U falls to 2 -- where C_U > 0.15*M_U is satisfied
+    // by a SINGLE contradicting coordinate. Those clusters are the multiplicity
+    // leak: the rule maximises over ~2n of them and the smallest ones have a
+    // null tail that no fixed RATE threshold controls, only a COUNT floor does.
+    unsigned long int cmin;
     weight_t query_alpha;
     unsigned long int seed;
     OracleSpec oracle;
@@ -463,7 +655,7 @@ class SpeciesTree : public Tree {
         //
         // Returns false, leaving the outputs untouched, when a corner is empty
         // or no sampled 4-set resolved.
-        bool corner_resolution_score(std::vector<Tree *> &input, const std::vector<index_t> *corners, unsigned long int samples, std::mt19937_64 &rng, double *margin, double *z, std::size_t *pooled);
+        bool corner_resolution_score(std::vector<Tree *> &input, const std::vector<index_t> *corners, unsigned long int samples, std::mt19937_64 &rng, double *margin, double *z, std::size_t *pooled, std::vector<double> *per_set = nullptr, std::vector<std::array<index_t, 4>> *per_quad = nullptr);
         void branch_cut_clusters(Node *root, std::size_t nwords, std::vector<std::vector<std::uint64_t>> &out, std::vector<std::uint64_t> &universe);
         SpeciesTree(std::vector<Tree *> &input, Dict *dict, SpeciesTree* display, QCFWriter *qcf_writer = nullptr);
         SpeciesTree(std::vector<Tree *> &input, Dict *dict, SpeciesTree* display, unsigned long int iter_limit_blob, QCFWriter *qcf_writer = nullptr);
