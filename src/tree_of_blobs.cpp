@@ -2993,6 +2993,72 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
         std::cout << "branch-cut: hypergeometric contrast on, "
                   << "Bonferroni level " << branch_cut.contrast_alpha << std::endl;
 
+    // Per-taxon anchor quality.  Ass. protocol still holds: these 4-sets are
+    // drawn before any edge is tested and without reference to any edge.
+    //
+    // Under the pure MSC a quartet's frequencies depend only on its internal
+    // branch, so anchor IDENTITY would not matter at all.  It matters here
+    // because the gene trees are ESTIMATED: a taxon that is placed unreliably
+    // depresses the resolution margin of every 4-set containing it.  The score
+    // is that taxon's mean per-4-set margin, which needs no true topology.
+    std::vector<double> anchor_q;
+    if (branch_cut.anchor_quality > 0 && ntaxa >= 4) {
+        std::vector<double> sum(ntaxa, 0.0);
+        std::vector<std::uint32_t> cnt(ntaxa, 0);
+        std::mt19937_64 qrng(branch_cut.seed ^ 0x51F3A9C7D2B84E61ULL);
+        std::uniform_int_distribution<std::size_t> pick(0, ntaxa - 1);
+        std::size_t used = 0;
+        for (std::size_t s = 0; s < (std::size_t) branch_cut.anchor_quality; ++s) {
+            index_t q[4];
+            for (int k = 0; k < 4; ) {
+                const index_t cand = (index_t) pick(qrng);
+                bool dup = false;
+                for (int j = 0; j < k; ++j) if (q[j] == cand) { dup = true; break; }
+                if (!dup) q[k++] = cand;
+            }
+            weight_t counts[3];
+            if (!quartet_counts(input, q[0], q[1], q[2], q[3], counts)) continue;
+            const double c0 = (double) counts[0], c1 = (double) counts[1],
+                         c2 = (double) counts[2];
+            const double tot = c0 + c1 + c2;
+            if (tot <= 0.0) continue;
+            const double hi = std::max(c0, std::max(c1, c2));
+            const double lo = std::min(c0, std::min(c1, c2));
+            const double margin = (hi - (tot - hi - lo)) / tot;
+            for (int k = 0; k < 4; ++k) { sum[q[k]] += margin; ++cnt[q[k]]; }
+            ++used;
+        }
+        anchor_q.assign(ntaxa, 1.0);
+        double mean = 0.0; std::size_t seen = 0;
+        for (std::size_t t = 0; t < ntaxa; ++t)
+            if (cnt[t] > 0) { anchor_q[t] = sum[t] / cnt[t]; mean += anchor_q[t]; ++seen; }
+        if (seen > 0) mean /= (double) seen;
+        // Normalise to mean 1, then floor at a small positive weight: a poor
+        // anchor is down-weighted but never excluded, so every parallel class
+        // stays reachable and Lem. cycle-cover's availability count is intact.
+        double wmin = 1e9, wmax = -1e9;
+        const double gam = branch_cut.anchor_power;
+        for (std::size_t t = 0; t < ntaxa; ++t) {
+            double v = (mean > 0.0) ? anchor_q[t] / mean : 1.0;
+            if (gam != 1.0) v = std::pow(std::max(v, 1e-6), gam);
+            if (v < 0.05) v = 0.05;
+            anchor_q[t] = v;
+            wmin = std::min(wmin, v);
+            wmax = std::max(wmax, v);
+        }
+        std::cout << "branch cut: anchor quality from " << used
+                  << " global 4-sets, gamma " << gam << ", weight range ["
+                  << wmin << ", " << wmax << "]" << std::endl;
+        if (!branch_cut.anchor_quality_out.empty()) {
+            std::ofstream qf(branch_cut.anchor_quality_out);
+            qf << "taxon\tname\tmean_margin\tn_sets\tweight\n";
+            for (std::size_t t = 0; t < ntaxa; ++t)
+                qf << t << '\t' << display->dict->index2label((index_t) t) << '\t'
+                   << (cnt[t] ? sum[t] / cnt[t] : 0.0) << '\t' << cnt[t]
+                   << '\t' << anchor_q[t] << '\n';
+        }
+    }
+
     for (std::size_t i = 0; i < internal.size(); ++i) {
         Node *edge = internal[i];
         edge->blob_id = i;
@@ -3231,6 +3297,27 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                             for (std::size_t k = 0; k < tA_sz; ++k) classes.push_back(k);
                         } else {
                             std::unordered_set<std::size_t> got;
+                            // Quality weighting draws b1 and b2 independently
+                            // with weight q(b), so a pair carries q(b1)q(b2).
+                            if (!anchor_q.empty()) {
+                                std::vector<double> w1(f1.size()), w2(f2.size());
+                                for (std::size_t k = 0; k < f1.size(); ++k)
+                                    w1[k] = anchor_q[f1[k]];
+                                for (std::size_t k = 0; k < f2.size(); ++k)
+                                    w2[k] = anchor_q[f2[k]];
+                                std::discrete_distribution<std::size_t>
+                                    d1(w1.begin(), w1.end()), d2(w2.begin(), w2.end());
+                                // Bounded: a heavily skewed weight vector can
+                                // keep redrawing the same few pairs, so fall
+                                // through to the uniform top-up below.
+                                const std::size_t guard = 64 * ncls + 64;
+                                for (std::size_t g = 0;
+                                     g < guard && classes.size() < ncls; ++g) {
+                                    const std::size_t v = d1(draw)
+                                                        + f1.size() * d2(draw);
+                                    if (got.insert(v).second) classes.push_back(v);
+                                }
+                            }
                             std::uniform_int_distribution<std::size_t> d(0, tA_sz - 1);
                             while (classes.size() < ncls) {
                                 const std::size_t v = d(draw);

@@ -388,6 +388,22 @@ struct BranchCutParams {
     // and their errors are perfectly correlated -- which is exactly the
     // independence ACROSS parallel classes that Ass. independence assumes.
     bool anchor_spread;
+    // Weight the anchor sample by a per-taxon QUALITY score instead of drawing
+    // it uniformly. Anchor identity is irrelevant under the pure MSC -- quartet
+    // frequencies depend only on the internal branch -- so any anchor effect
+    // comes from GENE TREE ESTIMATION error: a taxon that is placed unreliably
+    // in the estimated gene trees drags down the resolution margin of every
+    // 4-set that contains it. The score is therefore the mean per-4-set margin
+    // over a global sample, which is reference-free (no true topology needed)
+    // and drawn BEFORE any edge is tested, so Ass. protocol still holds.
+    // 0 disables; otherwise this is the number of global 4-sets to sample.
+    unsigned long int anchor_quality;
+    // Exponent on the quality score. The raw per-taxon mean margin spans only
+    // about [0.8, 1.05] at n25, so gamma = 1 is nearly uniform; the exponent is
+    // what decides whether the weighting bites at all.
+    double anchor_power;
+    // Write the per-taxon quality vector here for offline validation.
+    std::string anchor_quality_out;
     // Minimum number of ANCHOR PAIRS (t_A = |B1||B2|) an edge must have before
     // cycle_reuse is allowed to lift its depth. 1 = lift everywhere.
     //

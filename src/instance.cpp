@@ -74,6 +74,9 @@ Instance::Instance(int argc, char **argv) {
     branch_cut_cycle_reuse = true;        // lift the h <= t_A cap (Lem. cycle-cover)
     branch_cut_walecki = true;            // real edge-disjoint cycles, not random orders
     branch_cut_anchor_spread = true;      // sample anchor pairs, do not enumerate
+    branch_cut_anchor_quality = 0;        // uniform anchor sample, unweighted
+    branch_cut_anchor_power = 1.0;
+    branch_cut_anchor_quality_out = "";
     branch_cut_shared_coords = false;     // one sample per track, as before
     branch_cut_mode_spec = "";            // every track uses the cluster scan
     branch_cut_score_out = "";
@@ -482,6 +485,9 @@ long long Instance::solve() {
                 branch_cut.cycle_reuse = branch_cut_cycle_reuse;
                 branch_cut.walecki = branch_cut_walecki;
                 branch_cut.anchor_spread = branch_cut_anchor_spread;
+                branch_cut.anchor_quality = branch_cut_anchor_quality;
+                branch_cut.anchor_power = branch_cut_anchor_power;
+                branch_cut.anchor_quality_out = branch_cut_anchor_quality_out;
                 branch_cut.shared_coords = branch_cut_shared_coords;
                 branch_cut.score_out = branch_cut_score_out;
                 branch_cut.quad_out = branch_cut_quad_out;
@@ -1422,8 +1428,20 @@ int Instance::parse(int argc, char **argv) {
         else if (opt == "--branchcut-anchor-spread") {
             branch_cut_anchor_spread = true;
         }
+        else if (opt == "--branchcut-anchor-power") {
+            if (i < argc - 1) branch_cut_anchor_power = std::stod(argv[++ i]);
+        }
+        else if (opt == "--branchcut-anchor-quality-out") {
+            if (i < argc - 1) branch_cut_anchor_quality_out = argv[++ i];
+        }
         else if (opt == "--branchcut-no-anchor-spread") {
             branch_cut_anchor_spread = false;
+        }
+        else if (opt == "--branchcut-anchor-quality") {
+            branch_cut_anchor_quality = 4000;
+            if (i < argc - 1 && argv[i + 1][0] != '-')
+                branch_cut_anchor_quality = std::stoul(argv[++ i]);
+            branch_cut_anchor_spread = true;
         }
         else if (opt == "--branchcut-shared-coords") {
             branch_cut_shared_coords = true;
