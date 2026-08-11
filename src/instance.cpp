@@ -69,6 +69,7 @@ Instance::Instance(int argc, char **argv) {
     branch_cut_fixed_streams = false;     // shared stream, as earlier runs used
     branch_cut_cycle_reuse = false;       // keep the h <= t_A cap
     branch_cut_walecki = false;           // random orders + dedup, as before
+    branch_cut_anchor_spread = false;     // anchor pairs in enumeration order
     branch_cut_shared_coords = false;     // one sample per track, as before
     branch_cut_mode_spec = "";            // every track uses the cluster scan
     branch_cut_score_out = "";
@@ -476,6 +477,7 @@ long long Instance::solve() {
                 branch_cut.fixed_streams = branch_cut_fixed_streams;
                 branch_cut.cycle_reuse = branch_cut_cycle_reuse;
                 branch_cut.walecki = branch_cut_walecki;
+                branch_cut.anchor_spread = branch_cut_anchor_spread;
                 branch_cut.shared_coords = branch_cut_shared_coords;
                 branch_cut.score_out = branch_cut_score_out;
                 branch_cut.quad_out = branch_cut_quad_out;
@@ -1406,6 +1408,9 @@ int Instance::parse(int argc, char **argv) {
         }
         else if (opt == "--branchcut-walecki") {
             branch_cut_walecki = true;
+        }
+        else if (opt == "--branchcut-anchor-spread") {
+            branch_cut_anchor_spread = true;
         }
         else if (opt == "--branchcut-shared-coords") {
             branch_cut_shared_coords = true;

@@ -59,7 +59,7 @@ class Instance {
         double branch_cut_mlc_d, branch_cut_mlc_t;
         double branch_cut_cluster_margin, branch_cut_tau_low, branch_cut_tau_high;
         bool branch_cut_fixed_streams, branch_cut_cycle_reuse, branch_cut_shared_coords;
-        bool branch_cut_walecki;
+        bool branch_cut_walecki, branch_cut_anchor_spread;
         std::string branch_cut_mode_spec, branch_cut_score_out, branch_cut_quad_out;
         unsigned long int rowsweep_anchors;
         weight_t oracle_cf_max, oracle_margin;

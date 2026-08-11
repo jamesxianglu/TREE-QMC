@@ -3217,6 +3217,27 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                     // Labellings are drawn before any query (Ass. protocol).
                     const std::size_t tA_sz = f1.size() * f2.size();
                     const std::size_t ncls = std::min(h, tA_sz);
+                    // The anchor pairs actually used. The enumeration
+                    // f1i = k % |B1|, f2i = (k / |B1|) % |B2| walks B1 first, so
+                    // whenever |B1| >= ncls EVERY class shares b2 = B2[0]: the
+                    // edge leans on one anchor taxon and its errors are
+                    // perfectly correlated across classes, which is the
+                    // independence Ass. independence assumes between them.
+                    // Sampling the pairs uniformly costs nothing and removes it.
+                    std::vector<std::size_t> classes;
+                    if (branch_cut.anchor_spread && tA_sz > 0 && ncls > 0) {
+                        classes.reserve(ncls);
+                        if (ncls >= tA_sz) {
+                            for (std::size_t k = 0; k < tA_sz; ++k) classes.push_back(k);
+                        } else {
+                            std::unordered_set<std::size_t> got;
+                            std::uniform_int_distribution<std::size_t> d(0, tA_sz - 1);
+                            while (classes.size() < ncls) {
+                                const std::size_t v = d(draw);
+                                if (got.insert(v).second) classes.push_back(v);
+                            }
+                        }
+                    }
                     std::vector<std::vector<std::size_t>> perms;
                     if (use_walecki) {
                         perms.assign(ncls, order);
@@ -3230,9 +3251,14 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                         // Distinct parallel class => the cycles are edge-disjoint.
                         // Walecki walks the classes first so that cycle j > 0 of
                         // a class is reached only once every class holds one.
-                        const std::size_t cls = use_walecki ? (c % tA_sz) : c;
-                        const std::size_t f1i = (std::size_t) (cls % f1.size());
-                        const std::size_t f2i = (std::size_t) ((cls / f1.size()) % f2.size());
+                        // `cls` is the class SLOT (which labelling); `anc` is the
+                        // anchor pair that slot carries. They coincide unless
+                        // the pairs are being sampled rather than enumerated.
+                        const std::size_t cls = use_walecki ? (c % tA_sz)
+                                                            : (classes.empty() ? c : (c % ncls));
+                        const std::size_t anc = classes.empty() ? cls : classes[cls % ncls];
+                        const std::size_t f1i = (std::size_t) (anc % f1.size());
+                        const std::size_t f2i = (std::size_t) ((anc / f1.size()) % f2.size());
                         if (use_walecki) {
                             // Cycle j of K_m: hub perm[0], the other m-1 vertices
                             // on a circle, zig-zag from a rotating start

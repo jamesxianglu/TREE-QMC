@@ -381,6 +381,13 @@ struct BranchCutParams {
     // Walecki's construction is exactly edge-disjoint, so no coordinate is ever
     // dropped and the bound is restored by construction.
     bool walecki;
+    // Draw the h anchor pairs as a uniform sample of B1 x B2 rather than as the
+    // first h of the enumeration f1i = c % |B1|, f2i = (c/|B1|) % |B2|. That
+    // enumeration is degenerate whenever |B1| >= h: every class then shares the
+    // SAME b2 = B2[0], so all coordinates of the edge lean on one anchor taxon
+    // and their errors are perfectly correlated -- which is exactly the
+    // independence ACROSS parallel classes that Ass. independence assumes.
+    bool anchor_spread;
     // Minimum number of ANCHOR PAIRS (t_A = |B1||B2|) an edge must have before
     // cycle_reuse is allowed to lift its depth. 1 = lift everywhere.
     //
