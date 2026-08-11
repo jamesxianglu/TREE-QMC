@@ -3016,6 +3016,12 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
     // because the gene trees are ESTIMATED: a taxon that is placed unreliably
     // depresses the resolution margin of every 4-set containing it.  The score
     // is that taxon's mean per-4-set margin, which needs no true topology.
+    // Achieved certificate depth per (edge, side, track). `h` is silently
+    // clamped to what availability allows, so a request of 32 can deliver 1 on
+    // an edge whose far corners are a cherry -- and Thm. cycle-cover-global's
+    // bound (n-3)(2n-4)e^{-2h dbar} <= eps then holds for the h actually used,
+    // not the one asked for. Report it rather than let it pass in silence.
+    std::vector<std::uint32_t> achieved_h;
     std::vector<double> anchor_q;
     if (branch_cut.anchor_quality > 0 && ntaxa >= 4) {
         std::vector<double> sum(ntaxa, 0.0);
@@ -3278,6 +3284,7 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                         if (want > h_max) h_max = want;
                     }
                     if (h > h_max) h = h_max;
+                    achieved_h.push_back((std::uint32_t) h);
                     pairs.reserve(h * m);
                     bad.reserve(h * m);
                     // Only as many groups as there are cycles to split: an edge
@@ -3766,6 +3773,29 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
         if (witness.empty()) witness.push_back(0);
         for (std::size_t j = 0; j < 4; ++j)
             edge->minimizer[j] = witness[std::min(j, witness.size() - 1)];
+    }
+
+    if (!achieved_h.empty()) {
+        std::vector<std::uint32_t> hs = achieved_h;
+        std::sort(hs.begin(), hs.end());
+        const std::size_t k = hs.size();
+        const std::uint32_t want = (std::uint32_t) branch_cut.cycles;
+        std::size_t short_of = 0;
+        for (std::uint32_t v : hs) if (v < want) ++short_of;
+        // The count floor of Prop. count-floor needs M_U >= 1/tau, and
+        // Lem. cycle-cover gives M_U >= 2h, so h >= 1/(2 tau) suffices.
+        const double tau0 = branch_cut.tau.empty() ? 0.15 : (double) branch_cut.tau[0];
+        const std::uint32_t need = (std::uint32_t) std::ceil(1.0 / (2.0 * tau0));
+        std::size_t below_floor = 0;
+        for (std::uint32_t v : hs) if (v < need) ++below_floor;
+        std::cout << "branch cut: achieved depth h over " << k
+                  << " (edge, side, track) units -- requested " << want
+                  << ", min " << hs.front() << ", p5 " << hs[k / 20]
+                  << ", median " << hs[k / 2]
+                  << "; " << short_of << " (" << (100.0 * short_of / k)
+                  << "%) below the request, " << below_floor << " ("
+                  << (100.0 * below_floor / k) << "%) below the count floor h >= "
+                  << need << std::endl;
     }
 
     // Phase 2: propagation. The clusters that fired during screening are the
