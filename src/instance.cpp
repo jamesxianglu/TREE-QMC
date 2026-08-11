@@ -67,9 +67,13 @@ Instance::Instance(int argc, char **argv) {
     branch_cut_mlc_t = 0.0;
     branch_cut_mlc_min_group = 5;
     branch_cut_fixed_streams = false;     // shared stream, as earlier runs used
-    branch_cut_cycle_reuse = false;       // keep the h <= t_A cap
-    branch_cut_walecki = false;           // random orders + dedup, as before
-    branch_cut_anchor_spread = false;     // anchor pairs in enumeration order
+    // The three defaults below changed on 2026-08-11. Each was measured free
+    // or better and the three together are the best configuration tested
+    // (n150, 50 reps: err 11.92 -> 11.58*, fp_blob 1.82 -> 1.50*, J +0.018*).
+    // Use --branchcut-no-{cycle-reuse,walecki,anchor-spread} for the old paths.
+    branch_cut_cycle_reuse = true;        // lift the h <= t_A cap (Lem. cycle-cover)
+    branch_cut_walecki = true;            // real edge-disjoint cycles, not random orders
+    branch_cut_anchor_spread = true;      // sample anchor pairs, do not enumerate
     branch_cut_shared_coords = false;     // one sample per track, as before
     branch_cut_mode_spec = "";            // every track uses the cluster scan
     branch_cut_score_out = "";
@@ -1406,11 +1410,20 @@ int Instance::parse(int argc, char **argv) {
         else if (opt == "--branchcut-cycle-reuse") {
             branch_cut_cycle_reuse = true;
         }
+        else if (opt == "--branchcut-no-cycle-reuse") {
+            branch_cut_cycle_reuse = false;
+        }
         else if (opt == "--branchcut-walecki") {
             branch_cut_walecki = true;
         }
+        else if (opt == "--branchcut-no-walecki") {
+            branch_cut_walecki = false;
+        }
         else if (opt == "--branchcut-anchor-spread") {
             branch_cut_anchor_spread = true;
+        }
+        else if (opt == "--branchcut-no-anchor-spread") {
+            branch_cut_anchor_spread = false;
         }
         else if (opt == "--branchcut-shared-coords") {
             branch_cut_shared_coords = true;
