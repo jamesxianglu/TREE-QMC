@@ -414,6 +414,15 @@ struct BranchCutParams {
     // anchor pair is left exactly as before; this can only REMOVE rejections,
     // which is the conjunctive-guard shape that has worked in this project.
     unsigned long int anchor_corroborate;
+    // A side whose near set has only m = 2 taxa has exactly ONE near-side pair,
+    // so its only variation is the anchor. The code emits ONE query per cycle
+    // there (a 2-cycle would repeat the same 4-set), yet the availability
+    // accounting keeps the spanning-cycle bound 2h <= t_A and so caps h at
+    // t_A/2 -- HALF the available anchor pairs are never queried. Since one
+    // "cycle" on two vertices contributes one crossing, the honest bound is
+    // M_U >= h and h <= t_A. This flag uses it, doubling the evidence on
+    // exactly the cherry sides that carry 32% of the remaining error.
+    bool m2_full;
     // Minimum number of ANCHOR PAIRS (t_A = |B1||B2|) an edge must have before
     // cycle_reuse is allowed to lift its depth. 1 = lift everywhere.
     //

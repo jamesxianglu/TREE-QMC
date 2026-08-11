@@ -3243,8 +3243,10 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                     // cluster at least twice before de-duplication.
                     // Lem. cycle-cover's own availability bound; the
                     // one-cycle-per-anchor construction stops at t_A.
+                    // m == 2: one query per cycle, so one crossing per cycle
+                    // and the honest bound is h <= t_A, not 2h <= t_A.
                     const std::uint64_t h_avail = (m == 2)
-                        ? (t_A / 2)
+                        ? (branch_cut.m2_full ? t_A : (t_A / 2))
                         : std::min<std::uint64_t>(
                               t_A * std::max<std::uint64_t>(1, (m - 1) / 2),
                               (std::uint64_t) 1 << 32);
@@ -3254,7 +3256,7 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                         && t_A >= (std::uint64_t) branch_cut.reuse_min_anchors;
                     std::size_t h_max = (std::size_t) (may_reuse
                         ? h_avail
-                        : ((m == 2) ? (t_A / 2)
+                        : ((m == 2) ? (branch_cut.m2_full ? t_A : (t_A / 2))
                                     : std::min<std::uint64_t>(t_A, t_A * ((m - 1) / 2))));
                     // Targeted lift: give a THIN edge just enough depth to leave
                     // the first-order regime of Prop. count-floor, without
