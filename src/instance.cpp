@@ -79,6 +79,7 @@ Instance::Instance(int argc, char **argv) {
     branch_cut_anchor_quality_out = "";
     branch_cut_anchor_corroborate = 0;   // no anchor-level count floor
     branch_cut_m2_full = false;          // keep the conservative h <= t_A/2 at m=2
+    branch_cut_anchor_rotate = false;    // one anchor pair per cycle, as before
     branch_cut_shared_coords = false;     // one sample per track, as before
     branch_cut_mode_spec = "";            // every track uses the cluster scan
     branch_cut_score_out = "";
@@ -492,6 +493,7 @@ long long Instance::solve() {
                 branch_cut.anchor_quality_out = branch_cut_anchor_quality_out;
                 branch_cut.anchor_corroborate = branch_cut_anchor_corroborate;
                 branch_cut.m2_full = branch_cut_m2_full;
+                branch_cut.anchor_rotate = branch_cut_anchor_rotate;
                 branch_cut.shared_coords = branch_cut_shared_coords;
                 branch_cut.score_out = branch_cut_score_out;
                 branch_cut.quad_out = branch_cut_quad_out;
@@ -1437,6 +1439,10 @@ int Instance::parse(int argc, char **argv) {
         }
         else if (opt == "--branchcut-anchor-quality-out") {
             if (i < argc - 1) branch_cut_anchor_quality_out = argv[++ i];
+        }
+        else if (opt == "--branchcut-anchor-rotate") {
+            branch_cut_anchor_rotate = true;
+            branch_cut_anchor_spread = true;
         }
         else if (opt == "--branchcut-m2-full") {
             branch_cut_m2_full = true;

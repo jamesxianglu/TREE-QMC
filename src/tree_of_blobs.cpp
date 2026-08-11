@@ -3295,6 +3295,7 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                     // Walecki's decomposition is exactly edge-disjoint, so it
                     // never needs the dedup -- and never loses a crossing to it.
                     const bool use_walecki = branch_cut.walecki && m >= 3;
+                    const bool rotate = branch_cut.anchor_rotate && t_A > 1;
                     std::unordered_set<std::uint64_t> seen;
                     const bool dedup = !use_walecki
                                        && (may_reuse || branch_cut.min_depth > 0)
@@ -3357,6 +3358,15 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                             }
                         }
                     }
+                    // Anchor pool for rotation: the sampled classes when
+                    // spread is on, otherwise the whole of B1 x B2.
+                    std::vector<std::size_t> rot_pool;
+                    std::uniform_int_distribution<std::size_t> rot_any(
+                        0, tA_sz ? tA_sz - 1 : 0);
+                    std::uniform_int_distribution<std::size_t> rot_pick(
+                        0, classes.empty() ? 0 : classes.size() - 1);
+                    if (rotate && !classes.empty()) rot_pool = classes;
+                    if (rotate) seen.reserve(h * m * 2);
                     std::vector<std::vector<std::size_t>> perms;
                     if (use_walecki) {
                         perms.assign(ncls, order);
@@ -3376,8 +3386,8 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                         const std::size_t cls = use_walecki ? (c % tA_sz)
                                                             : (classes.empty() ? c : (c % ncls));
                         const std::size_t anc = classes.empty() ? cls : classes[cls % ncls];
-                        const std::size_t f1i = (std::size_t) (anc % f1.size());
-                        const std::size_t f2i = (std::size_t) ((anc / f1.size()) % f2.size());
+                        std::size_t f1i = (std::size_t) (anc % f1.size());
+                        std::size_t f2i = (std::size_t) ((anc / f1.size()) % f2.size());
                         if (use_walecki) {
                             // Cycle j of K_m: hub perm[0], the other m-1 vertices
                             // on a circle, zig-zag from a rotating start
@@ -3407,7 +3417,35 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                             const index_t x = near[order[i]];
                             const index_t y = near[order[(i + 1) % m]];
                             if (m == 2 && i == 1) break;   // avoid the duplicate edge
-                            if (dedup) {
+                            if (rotate) {
+                                // A fresh anchor for THIS coordinate. Lem.
+                                // cycle-cover only constrains the near-side
+                                // pairs, so the crossing count is untouched --
+                                // but a thin cluster's two crossings per cycle
+                                // now carry two different anchors instead of
+                                // one. Redraw on collision so every 4-set stays
+                                // distinct; give up after a few tries and keep
+                                // the cycle's own anchor.
+                                const std::uint64_t lo = std::min(x, y), hi = std::max(x, y);
+                                bool placed = false;
+                                for (int att = 0; att < 8 && !placed; ++att) {
+                                    const std::size_t v = rot_pool.empty()
+                                        ? rot_any(draw)
+                                        : rot_pool[rot_pick(draw)];
+                                    const std::size_t g1 = v % f1.size();
+                                    const std::size_t g2 = (v / f1.size()) % f2.size();
+                                    const std::uint64_t key = (((std::uint64_t) g1) << 48)
+                                        ^ (((std::uint64_t) g2) << 32) ^ (lo << 16) ^ hi;
+                                    if (seen.insert(key).second) {
+                                        f1i = g1; f2i = g2; placed = true;
+                                    }
+                                }
+                                if (!placed) {
+                                    const std::uint64_t key = (((std::uint64_t) f1i) << 48)
+                                        ^ (((std::uint64_t) f2i) << 32) ^ (lo << 16) ^ hi;
+                                    if (!seen.insert(key).second) continue;
+                                }
+                            } else if (dedup) {
                                 const std::uint64_t lo = std::min(x, y), hi = std::max(x, y);
                                 const std::uint64_t key = (((std::uint64_t) f1i) << 48)
                                     ^ (((std::uint64_t) f2i) << 32) ^ (lo << 16) ^ hi;

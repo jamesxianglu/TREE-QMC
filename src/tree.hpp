@@ -414,6 +414,15 @@ struct BranchCutParams {
     // anchor pair is left exactly as before; this can only REMOVE rejections,
     // which is the conjunctive-guard shape that has worked in this project.
     unsigned long int anchor_corroborate;
+    // Vary the anchor pair PER COORDINATE instead of per cycle. Lem.
+    // cycle-cover's crossing guarantee is a property of the NEAR-side pairs
+    // only, so nothing requires a cycle's m coordinates to share one (b1,b2) --
+    // and today they do, which means a thin cluster's 2h crossings carry only h
+    // distinct anchors, two per anchor. Rotating gives up to 2h, doubling the
+    // effective independent sample exactly where Prop. count-floor bites.
+    // Needs only t_A >= 2, so unlike anchor_spread it reaches the t_min <= 4
+    // population that holds 68% of the remaining error.
+    bool anchor_rotate;
     // A side whose near set has only m = 2 taxa has exactly ONE near-side pair,
     // so its only variation is the anchor. The code emits ONE query per cycle
     // there (a 2-cycle would repeat the same 4-set), yet the availability
