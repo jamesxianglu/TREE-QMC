@@ -3194,20 +3194,69 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                     // and asking two groups of it would make the certificate
                     // uncorroborable and the edge unrejectable.
                     if (G > 1) { grp.reserve(h * m); Geff = std::min(G, h); }
+                    // Walecki's decomposition is exactly edge-disjoint, so it
+                    // never needs the dedup -- and never loses a crossing to it.
+                    const bool use_walecki = branch_cut.walecki && m >= 3;
                     std::unordered_set<std::uint64_t> seen;
-                    const bool dedup = (may_reuse || branch_cut.min_depth > 0)
+                    const bool dedup = !use_walecki
+                                       && (may_reuse || branch_cut.min_depth > 0)
                                        && (std::uint64_t) h > t_A;
                     if (dedup) seen.reserve(h * m * 2);
                     std::vector<std::size_t> order(m);
                     for (std::size_t i = 0; i < m; ++i) order[i] = i;
+                    // Under Walecki the cycles of a class are deterministic
+                    // rotations of a zig-zag on one vertex labelling, so the
+                    // randomness sits in the labelling rather than in each
+                    // cycle. Edge-disjointness is only ever needed WITHIN a
+                    // class -- two cycles in different classes carry different
+                    // anchor pairs, hence different 4-sets, whatever near-side
+                    // edges they share -- so each class gets its OWN labelling.
+                    // Sharing one labelling across all classes costs accuracy
+                    // (measured at n50: err 4.05 -> 4.45, J -0.024) because it
+                    // makes every class probe the same near-side pairs.
+                    // Labellings are drawn before any query (Ass. protocol).
+                    const std::size_t tA_sz = f1.size() * f2.size();
+                    const std::size_t ncls = std::min(h, tA_sz);
+                    std::vector<std::vector<std::size_t>> perms;
+                    if (use_walecki) {
+                        perms.assign(ncls, order);
+                        for (std::size_t p = 0; p < ncls; ++p)
+                            for (std::size_t i = m; i > 1; --i) {
+                                std::uniform_int_distribution<std::size_t> d(0, i - 1);
+                                std::swap(perms[p][i - 1], perms[p][d(draw)]);
+                            }
+                    }
                     for (std::size_t c = 0; c < h; ++c) {
                         // Distinct parallel class => the cycles are edge-disjoint.
-                        const std::size_t f1i = (std::size_t) (c % f1.size());
-                        const std::size_t f2i = (std::size_t) ((c / f1.size()) % f2.size());
+                        // Walecki walks the classes first so that cycle j > 0 of
+                        // a class is reached only once every class holds one.
+                        const std::size_t cls = use_walecki ? (c % tA_sz) : c;
+                        const std::size_t f1i = (std::size_t) (cls % f1.size());
+                        const std::size_t f2i = (std::size_t) ((cls / f1.size()) % f2.size());
+                        if (use_walecki) {
+                            // Cycle j of K_m: hub perm[0], the other m-1 vertices
+                            // on a circle, zig-zag from a rotating start
+                            //   a, a+1, a-1, a+2, a-2, ...   (mod M = m-1).
+                            // Rotating `a` gives floor((m-1)/2) pairwise
+                            // edge-disjoint spanning cycles -- Lem. cycle-cover's
+                            // availability bound, met exactly.
+                            const std::size_t M = m - 1;
+                            const std::size_t j = c / tA_sz;
+                            const std::vector<std::size_t> &perm = perms[cls];
+                            std::size_t k = 0;
+                            order[k++] = perm[0];
+                            order[k++] = perm[1 + (j % M)];
+                            for (std::size_t t = 1; k < m; ++t) {
+                                order[k++] = perm[1 + ((j + t) % M)];
+                                if (k < m)
+                                    order[k++] = perm[1 + ((j + M - t) % M)];
+                            }
+                        } else {
                         // Vertex order drawn before any query (Ass. protocol).
                         for (std::size_t i = m; i > 1; --i) {
                             std::uniform_int_distribution<std::size_t> d(0, i - 1);
                             std::swap(order[i - 1], order[d(draw)]);
+                        }
                         }
                         for (std::size_t i = 0; i < m; ++i) {
                             const index_t x = near[order[i]];

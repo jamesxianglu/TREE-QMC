@@ -372,6 +372,15 @@ struct BranchCutParams {
     // saturation, is what made h = 64 and h = 200 indistinguishable from h = 32,
     // because for a far cherry t_A = 1.
     bool cycle_reuse;
+    // Draw the extra within-class cycles as a genuine Walecki decomposition of
+    // K_m instead of as fresh random vertex orders. Random orders are
+    // edge-disjoint only in expectation, so `cycle_reuse` de-duplicates the
+    // collisions -- and a dropped coordinate is a lost crossing, which is why
+    // the shipped reuse path does NOT deliver Lem. cycle-cover's M_U >= 2h
+    // (measured: 48.7% of clusters short of it at h = 32, minimum 24 of 64).
+    // Walecki's construction is exactly edge-disjoint, so no coordinate is ever
+    // dropped and the bound is restored by construction.
+    bool walecki;
     // Minimum number of ANCHOR PAIRS (t_A = |B1||B2|) an edge must have before
     // cycle_reuse is allowed to lift its depth. 1 = lift everywhere.
     //
