@@ -77,6 +77,7 @@ Instance::Instance(int argc, char **argv) {
     branch_cut_anchor_quality = 0;        // uniform anchor sample, unweighted
     branch_cut_anchor_power = 1.0;
     branch_cut_anchor_quality_out = "";
+    branch_cut_anchor_corroborate = 0;   // no anchor-level count floor
     branch_cut_shared_coords = false;     // one sample per track, as before
     branch_cut_mode_spec = "";            // every track uses the cluster scan
     branch_cut_score_out = "";
@@ -488,6 +489,7 @@ long long Instance::solve() {
                 branch_cut.anchor_quality = branch_cut_anchor_quality;
                 branch_cut.anchor_power = branch_cut_anchor_power;
                 branch_cut.anchor_quality_out = branch_cut_anchor_quality_out;
+                branch_cut.anchor_corroborate = branch_cut_anchor_corroborate;
                 branch_cut.shared_coords = branch_cut_shared_coords;
                 branch_cut.score_out = branch_cut_score_out;
                 branch_cut.quad_out = branch_cut_quad_out;
@@ -1433,6 +1435,11 @@ int Instance::parse(int argc, char **argv) {
         }
         else if (opt == "--branchcut-anchor-quality-out") {
             if (i < argc - 1) branch_cut_anchor_quality_out = argv[++ i];
+        }
+        else if (opt == "--branchcut-anchor-corroborate") {
+            branch_cut_anchor_corroborate = 2;
+            if (i < argc - 1 && argv[i + 1][0] != '-')
+                branch_cut_anchor_corroborate = std::stoul(argv[++ i]);
         }
         else if (opt == "--branchcut-no-anchor-spread") {
             branch_cut_anchor_spread = false;

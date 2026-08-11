@@ -2682,6 +2682,14 @@ static inline bool bits_equal(const std::vector<std::uint64_t> &a,
     return true;
 }
 
+static inline int popcount64(std::uint64_t v) {
+#if defined(__GNUC__) || defined(__clang__)
+    return __builtin_popcountll(v);
+#else
+    int c = 0; while (v) { v &= v - 1; ++c; } return c;
+#endif
+}
+
 static inline bool bits_any(const std::vector<std::uint64_t> &a) {
     for (std::uint64_t w : a) if (w) return true;
     return false;
@@ -3195,6 +3203,10 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                 // Split-sample corroboration: which group of cycles supplied
                 // each coordinate.  See BranchCutParams::corroborate.
                 std::vector<std::uint8_t> grp;
+                // Which anchor pair supplied each coordinate (capped at 63 so a
+                // cluster's set of contradicting anchors fits one 64-bit mask).
+                std::vector<std::uint8_t> ancid;
+                const bool want_anc = branch_cut.anchor_corroborate > 1;
                 std::size_t Geff = 1;
 
                 if (branch_cut.cycles > 0) {
@@ -3385,6 +3397,8 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                                 input, x, y, f1[f1i], f2[f2i], branch_cut.oracle, track);
                             pairs.push_back(std::make_pair(x, y));
                             bad.push_back(agree ? 0 : 1);
+                            if (want_anc)
+                                ancid.push_back((std::uint8_t) std::min<std::size_t>(anc, 63));
                             if (Geff > 1)
                                 grp.push_back((std::uint8_t) (c % Geff));
                         }
@@ -3411,6 +3425,9 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                         input, x, y, f1[f1i], f2[f2i], branch_cut.oracle, track);
                     pairs.push_back(std::make_pair(x, y));
                     bad.push_back(agree ? 0 : 1);
+                    if (want_anc)
+                        ancid.push_back((std::uint8_t) std::min<std::uint64_t>(
+                            f1i + (std::uint64_t) f1.size() * f2i, 63));
                     if (Geff > 1)
                         grp.push_back((std::uint8_t) ((pairs.size() - 1) % Geff));
                 }
@@ -3477,6 +3494,7 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                     if (bits_equal(U, nearmask)) continue;   // U must be proper
                     std::size_t M = 0, C = 0;
                     std::uint32_t Mg[64], Cg[64];
+                    std::uint64_t anc_seen = 0, anc_bad = 0;
                     if (Geff > 1)
                         for (std::size_t g = 0; g < Geff; ++g) { Mg[g] = 0; Cg[g] = 0; }
                     for (std::size_t j = 0; j < pairs.size(); ++j) {
@@ -3485,12 +3503,28 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                         if (in_x == in_y) continue;          // does not cross U
                         ++M;
                         C += bad[j];
+                        if (want_anc && j < ancid.size()) {
+                            const std::uint64_t bit = (std::uint64_t) 1 << ancid[j];
+                            anc_seen |= bit;
+                            if (bad[j]) anc_bad |= bit;
+                        }
                         if (Geff > 1) {
                             const std::size_t g = grp[j];
                             ++Mg[g]; Cg[g] += (std::uint32_t) bad[j];
                         }
                     }
                     if (M < (std::size_t) branch_cut.min_support) continue;
+                    // Anchor-level count floor (Ass. blocked): the effective
+                    // independent sample of this cluster is the number of
+                    // anchor pairs crossing it, so require the contradictions
+                    // to span min(K, available) of them. Vacuous when only one
+                    // anchor pair reaches U, so a far cherry is unchanged.
+                    if (want_anc) {
+                        const int have = popcount64(anc_seen);
+                        const int need = std::min<int>(
+                            (int) branch_cut.anchor_corroborate, have);
+                        if (popcount64(anc_bad) < need) continue;
+                    }
                     if (collect) {
                         cl_ui.push_back((std::uint32_t) ui);
                         cl_M.push_back((std::uint32_t) M);

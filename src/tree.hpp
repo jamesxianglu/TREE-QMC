@@ -404,6 +404,16 @@ struct BranchCutParams {
     double anchor_power;
     // Write the per-taxon quality vector here for offline validation.
     std::string anchor_quality_out;
+    // A cluster may fire only if its CONTRADICTIONS span at least this many
+    // distinct anchor pairs. Ass. blocked allows arbitrary dependence WITHIN an
+    // anchor pair, so the effective independent sample of a side is its number
+    // of anchor pairs `a`, not M_U -- and Prop. count-floor's first-order
+    // regime is then a < 1/tau, i.e. a <= 6 at tau = 0.15. Measured at n150:
+    // 68% of testable error sits on edges with min(t_A,t_B) <= 4, where that
+    // condition always holds. The bar is min(K, a), so a side with a single
+    // anchor pair is left exactly as before; this can only REMOVE rejections,
+    // which is the conjunctive-guard shape that has worked in this project.
+    unsigned long int anchor_corroborate;
     // Minimum number of ANCHOR PAIRS (t_A = |B1||B2|) an edge must have before
     // cycle_reuse is allowed to lift its depth. 1 = lift everywhere.
     //
