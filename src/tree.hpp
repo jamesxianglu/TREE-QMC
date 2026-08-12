@@ -423,6 +423,13 @@ struct BranchCutParams {
     // Needs only t_A >= 2, so unlike anchor_spread it reaches the t_min <= 4
     // population that holds 68% of the remaining error.
     bool anchor_rotate;
+    // Systematic rather than uniform-random anchor assignment: walk a random
+    // permutation of the anchor pool, one entry per coordinate, reshuffling on
+    // each pass. Uniform sampling has multinomial variance, so a thin cluster's
+    // two crossings can land on the SAME anchor by chance -- exactly what
+    // rotation is meant to prevent. A systematic walk guarantees even coverage
+    // and strictly lower variance at identical cost.
+    bool anchor_balanced;
     // A side whose near set has only m = 2 taxa has exactly ONE near-side pair,
     // so its only variation is the anchor. The code emits ONE query per cycle
     // there (a 2-cycle would repeat the same 4-set), yet the availability

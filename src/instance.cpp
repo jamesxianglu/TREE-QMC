@@ -43,7 +43,13 @@ Instance::Instance(int argc, char **argv) {
     branch_cut_resolution_z = 0.0;        // deprecated, not scale-free
     branch_cut_resolution_margin = 0.0;   // off by default
     branch_cut_propagate_tau = 0.0;       // off by default (no phase 2)
-    branch_cut_cycles = 0;                // 0 = the older uniform random sampling
+    // NO DEFAULT: `h` is a budget/accuracy choice, and the fallback at 0 is not
+    // the cycle certificate at all but the older uniform random sampling, which
+    // carries no Lem. cycle-cover guarantee. Silently picking either one for the
+    // user hides that, so --branchcut-blob now requires an explicit value.
+    // `--branchcut-cycles 0` still selects uniform sampling, but you must say so.
+    branch_cut_cycles = 0;
+    branch_cut_cycles_set = false;
     branch_cut_corroborate = 0;           // 0/1 = no split-sample corroboration
     branch_cut_corroborate_frac = 1.0;    // all groups must fire
     branch_cut_corroborate_bar = 0.0;     // 0 = the inner bar is tau itself
@@ -80,6 +86,7 @@ Instance::Instance(int argc, char **argv) {
     branch_cut_anchor_corroborate = 0;   // no anchor-level count floor
     branch_cut_m2_full = false;          // keep the conservative h <= t_A/2 at m=2
     branch_cut_anchor_rotate = false;    // one anchor pair per cycle, as before
+    branch_cut_anchor_balanced = false;  // uniform-random rotation when rotating
     branch_cut_shared_coords = false;     // one sample per track, as before
     branch_cut_mode_spec = "";            // every track uses the cluster scan
     branch_cut_score_out = "";
@@ -494,6 +501,7 @@ long long Instance::solve() {
                 branch_cut.anchor_corroborate = branch_cut_anchor_corroborate;
                 branch_cut.m2_full = branch_cut_m2_full;
                 branch_cut.anchor_rotate = branch_cut_anchor_rotate;
+                branch_cut.anchor_balanced = branch_cut_anchor_balanced;
                 branch_cut.shared_coords = branch_cut_shared_coords;
                 branch_cut.score_out = branch_cut_score_out;
                 branch_cut.quad_out = branch_cut_quad_out;
@@ -1355,6 +1363,7 @@ int Instance::parse(int argc, char **argv) {
             } else { std::cout << "\nERROR: --resolution-min-pooled needs a value" << std::endl; return 1; }
         }
         else if (opt == "--branchcut-cycles") {
+            branch_cut_cycles_set = true;
             if (i + 1 < argc) {
                 if (!s2ul(argv[++ i], &branch_cut_cycles)) {
                     std::cout << "\nERROR: invalid --branchcut-cycles" << std::endl;
@@ -1442,6 +1451,11 @@ int Instance::parse(int argc, char **argv) {
         }
         else if (opt == "--branchcut-anchor-rotate") {
             branch_cut_anchor_rotate = true;
+            branch_cut_anchor_spread = true;
+        }
+        else if (opt == "--branchcut-anchor-balanced") {
+            branch_cut_anchor_rotate = true;
+            branch_cut_anchor_balanced = true;
             branch_cut_anchor_spread = true;
         }
         else if (opt == "--branchcut-m2-full") {
@@ -1597,6 +1611,23 @@ int Instance::parse(int argc, char **argv) {
     if (corner_row_blob && row_sweep_blob) {
         std::cout << "\nERROR: --cornerrow-blob cannot be combined with "
                   << "--rowsweep-blob" << std::endl;
+        return 2;
+    }
+
+    if (branch_cut_blob && !branch_cut_cycles_set) {
+        std::cout << "\nERROR: --branchcut-blob requires an explicit "
+                  << "--branchcut-cycles h.\n"
+                  << "  h is the certificate depth: Lem. cycle-cover crosses "
+                  << "every cluster >= 2h times,\n"
+                  << "  and Thm. cycle-cover-global's error bound holds for the "
+                  << "h you ACTUALLY achieve.\n"
+                  << "  There is deliberately no default. h = 32 was the "
+                  << "empirical optimum at n150\n"
+                  << "  (unimodal: 8/16/24/32/64 gave err 12.20/12.12/11.66/"
+                  << "11.58/11.68).\n"
+                  << "  Use --branchcut-cycles 0 to select the older uniform "
+                  << "random sampling instead,\n"
+                  << "  which carries NO cycle-cover guarantee." << std::endl;
         return 2;
     }
 

@@ -3366,6 +3366,18 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                     std::uniform_int_distribution<std::size_t> rot_pick(
                         0, classes.empty() ? 0 : classes.size() - 1);
                     if (rotate && !classes.empty()) rot_pool = classes;
+                    if (rotate && rot_pool.empty() && tA_sz > 0) {
+                        // no `classes` (spread off): walk all of B1 x B2
+                        rot_pool.resize(std::min<std::size_t>(tA_sz, 4096));
+                        for (std::size_t k = 0; k < rot_pool.size(); ++k) rot_pool[k] = k;
+                    }
+                    // Systematic walk: a random permutation of the pool consumed
+                    // one entry per coordinate, reshuffled on each pass, so every
+                    // anchor is used within one of every other.
+                    std::vector<std::size_t> walk = rot_pool;
+                    std::size_t walk_i = walk.size();   // force a shuffle first
+                    const bool balanced = rotate && branch_cut.anchor_balanced
+                                          && !walk.empty();
                     if (rotate) seen.reserve(h * m * 2);
                     std::vector<std::vector<std::size_t>> perms;
                     if (use_walecki) {
@@ -3429,9 +3441,21 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                                 const std::uint64_t lo = std::min(x, y), hi = std::max(x, y);
                                 bool placed = false;
                                 for (int att = 0; att < 8 && !placed; ++att) {
-                                    const std::size_t v = rot_pool.empty()
-                                        ? rot_any(draw)
-                                        : rot_pool[rot_pick(draw)];
+                                    std::size_t v;
+                                    if (balanced) {
+                                        if (walk_i >= walk.size()) {
+                                            for (std::size_t q = walk.size(); q > 1; --q) {
+                                                std::uniform_int_distribution<std::size_t>
+                                                    dd(0, q - 1);
+                                                std::swap(walk[q - 1], walk[dd(draw)]);
+                                            }
+                                            walk_i = 0;
+                                        }
+                                        v = walk[walk_i++];
+                                    } else {
+                                        v = rot_pool.empty() ? rot_any(draw)
+                                                             : rot_pool[rot_pick(draw)];
+                                    }
                                     const std::size_t g1 = v % f1.size();
                                     const std::size_t g2 = (v / f1.size()) % f2.size();
                                     const std::uint64_t key = (((std::uint64_t) g1) << 48)
