@@ -2989,6 +2989,11 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
         int track, side;
         std::size_t M_all, C_all;
         std::vector<std::uint32_t> ui, M, C;
+        // How many DISTINCT anchor pairs the crossing coordinates came from,
+        // and how many the CONTRADICTING ones came from. This is the statistic
+        // --branchcut-anchor-corroborate reads, and the dump has never had it,
+        // so no floor estimate has ever bounded that rule.
+        std::vector<std::uint32_t> Aall, Abad;
     };
     std::vector<std::vector<SideRecord>> dump(dumping ? internal.size() : 0);
     std::vector<std::array<double, 4>> dump_res(
@@ -3000,8 +3005,16 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
     // and the dump could not see it.
     std::vector<std::array<std::uint32_t, 4>> dump_corner(
         dumping ? internal.size() : 0, {0u, 0u, 0u, 0u});
-    std::vector<std::array<double, 7>> dump_disp(
-        dumping ? internal.size() : 0, {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+    // 9 slots: min,q10,q25,med,mean,sd,n, then SKEW and KURTOSIS. The blob
+    // signal is a MIXTURE (Lem. branch-restriction: only the 4-sets meeting
+    // four distinct branches at the blob vertex are anomalous), and asymmetric
+    // contamination moves the SKEW far more diagnostically than the sd, which
+    // rises for any widening. Measured at n100: adding skew to the recorded
+    // statistics drops the Bayes floor 4.38 -> 3.75 per replicate, and its
+    // permutation importance (0.0175) is twice m_sd's (0.0089).
+    std::vector<std::array<double, 9>> dump_disp(
+        dumping ? internal.size() : 0,
+        {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
     std::vector<std::array<double, 2>> dump_mlc(
         dumping ? internal.size() : 0, {0.0, 0.0});
     if (contrast)
@@ -3223,7 +3236,7 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                 // Which anchor pair supplied each coordinate (capped at 63 so a
                 // cluster's set of contradicting anchors fits one 64-bit mask).
                 std::vector<std::uint8_t> ancid;
-                const bool want_anc = branch_cut.anchor_corroborate > 1;
+                const bool want_anc = branch_cut.anchor_corroborate > 1 || dumping;
                 std::size_t Geff = 1;
 
                 if (branch_cut.cycles > 0) {
@@ -3573,7 +3586,7 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                 // first firing cluster cannot settle the edge, because the
                 // Bonferroni factor needs the number of eligible clusters and
                 // the dump needs all of them; so gather first, decide after.
-                std::vector<std::uint32_t> cl_ui, cl_M, cl_C;
+                std::vector<std::uint32_t> cl_ui, cl_M, cl_C, cl_Aall, cl_Abad;
                 std::vector<char> cl_cor;   // corroborated in every group?
                 for (std::size_t ui = 0; ui < clusters.size(); ++ui) {
                     const std::vector<std::uint64_t> &U = clusters[ui];
@@ -3616,6 +3629,8 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                         cl_ui.push_back((std::uint32_t) ui);
                         cl_M.push_back((std::uint32_t) M);
                         cl_C.push_back((std::uint32_t) C);
+                        cl_Aall.push_back((std::uint32_t) popcount64(anc_seen));
+                        cl_Abad.push_back((std::uint32_t) popcount64(anc_bad));
                         if (Geff > 1) {
                             const double ib = inner_bar(tau_t);
                             std::size_t voted = 0;
@@ -3707,6 +3722,7 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                         rec.track = (int) track; rec.side = side;
                         rec.M_all = M_all; rec.C_all = C_all;
                         rec.ui = cl_ui; rec.M = cl_M; rec.C = cl_C;
+                        rec.Aall = cl_Aall; rec.Abad = cl_Abad;
                         dump[i].push_back(rec);
                     }
                 }
@@ -3722,7 +3738,7 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
         const bool want_res = (branch_cut.resolution_z != 0.0
                                || branch_cut.resolution_margin != 0.0);
         // min, q10, q25, median, mean, sd, count of the per-4-set margins.
-        std::array<double, 7> disp = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+        std::array<double, 9> disp = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
         double mlc_d = 0.0, mlc_t = 0.0;
         const bool want_mlc = dumping || branch_cut.mlc_d != 0.0
                               || branch_cut.mlc_t != 0.0;
@@ -3784,6 +3800,19 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                 disp[4] = mean;
                 disp[5] = std::sqrt(var);                           // sd
                 disp[6] = (double) k;
+                // Skew and excess kurtosis of the per-4-set margins.
+                double m3 = 0.0, m4 = 0.0;
+                for (double v : srt) {
+                    const double dv = v - mean;
+                    m3 += dv * dv * dv;
+                    m4 += dv * dv * dv * dv;
+                }
+                m3 /= (double) k; m4 /= (double) k;
+                const double sd = disp[5];
+                if (sd > 1e-12) {
+                    disp[7] = m3 / (sd * sd * sd);
+                    disp[8] = m4 / (sd * sd * sd * sd) - 3.0;
+                }
             }
             if (dumping) {
                 dump_res[i] = {ok ? 1.0 : 0.0, res_margin, res_z, (double) res_pooled};
@@ -3927,7 +3956,8 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
         }
         fout << "edge_id\tisfake\trejected\tres_ok\tres_margin\tres_z"
                 "\tres_pooled\tm_min\tm_q10\tm_q25\tm_med\tm_mean\tm_sd"
-                "\tm_n\tmlc_d\tmlc_t\tc0\tc1\tc2\tc3\tevidence\tside\n";
+                "\tm_n\tm_skew\tm_kurt\tmlc_d\tmlc_t"
+                "\tc0\tc1\tc2\tc3\tevidence\tside\n";
         for (std::size_t i = 0; i < internal.size(); ++i) {
             Node *edge = internal[i];
             fout << i << "\t" << (edge->isfake ? 1 : 0) << "\t"
@@ -3939,6 +3969,7 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                 fout << 0 << "\tNA\tNA\t0";
             for (std::size_t q = 0; q < 6; ++q) fout << "\t" << dump_disp[i][q];
             fout << "\t" << (std::size_t) dump_disp[i][6];
+            fout << "\t" << dump_disp[i][7] << "\t" << dump_disp[i][8];
             fout << "\t" << dump_mlc[i][0] << "\t" << dump_mlc[i][1];
             for (int q = 0; q < 4; ++q) fout << "\t" << dump_corner[i][q];
             fout << "\t";
@@ -3950,9 +3981,12 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                 if (b) fout << "|";
                 fout << r.track << ":" << r.side << ":" << r.M_all << ":"
                      << r.C_all << ":";
-                for (std::size_t q = 0; q < r.ui.size(); ++q)
+                for (std::size_t q = 0; q < r.ui.size(); ++q) {
                     fout << (q ? ";" : "") << r.ui[q] << "," << r.M[q] << ","
                          << r.C[q];
+                    if (q < r.Aall.size())
+                        fout << "," << r.Aall[q] << "," << r.Abad[q];
+                }
             }
             fout << "\t";
             std::vector<index_t> A, B;
