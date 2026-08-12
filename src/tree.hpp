@@ -439,14 +439,25 @@ struct BranchCutParams {
     // value is ceil(1/tau), the anchor count below which Prop. count-floor is
     // first order.
     unsigned long int anchor_rotate_max;
-    // Conjunctive GUARD on the whole contraction decision: an edge may only be
-    // contracted if the SKEW of its per-4-set resolution margins is below this.
-    // Lem. branch-restriction makes a blob edge a MIXTURE -- only the 4-sets
-    // meeting four distinct branches at the blob vertex are anomalous -- and
-    // asymmetric contamination pushes the margin distribution's left tail out.
-    // Measured at n100: true edges average skew +0.18, spurious -3.33.
-    // As a guard this is worth -0.62 err/rep; as a disjunctive ADDITION it is
-    // catastrophic (+7.5), which is the architecture rule again. 0 disables.
+    // FALSIFIED 2026-08-11 -- kept inert so the negative result is reproducible.
+    //
+    // Conjunctive guard: contract only if the SKEW of the per-4-set resolution
+    // margins is below this. The motivation was sound (Lem. branch-restriction
+    // makes a blob edge a mixture, and asymmetric contamination pushes the left
+    // tail out) and the class separation is real: at n100 true edges average
+    // skew +0.14, spurious -2.88. It still does not work.
+    //
+    //   in-sample, 8 replicates, n100        5.12 -> 4.50 err/rep  (looked good)
+    //   HELD-OUT, 25 replicates, n100        5.36 -> 5.48          (+0.12)
+    //   independent n150, 50 replicates     11.58 -> 12.58         (+1.00),
+    //                                        J 0.8419 -> 0.6729    (-0.169*)
+    //
+    // The two held-out halves also chose very different thresholds (0.0 and
+    // +0.5) and picking wrong costs ~0.9, so no single global cutoff transfers.
+    // m_skew is likewise worth exactly ZERO as a term in a held-out linear
+    // score (4.36 err/rep with it, 4.36 without). The earlier claim that it
+    // lowered the Bayes floor came from 8 replicates and 14 added features on a
+    // boosted-tree model -- overfitting, not signal. 0 disables.
     double skew_guard;
     // A side whose near set has only m = 2 taxa has exactly ONE near-side pair,
     // so its only variation is the anchor. The code emits ONE query per cycle
