@@ -439,6 +439,15 @@ struct BranchCutParams {
     // value is ceil(1/tau), the anchor count below which Prop. count-floor is
     // first order.
     unsigned long int anchor_rotate_max;
+    // Conjunctive GUARD on the whole contraction decision: an edge may only be
+    // contracted if the SKEW of its per-4-set resolution margins is below this.
+    // Lem. branch-restriction makes a blob edge a MIXTURE -- only the 4-sets
+    // meeting four distinct branches at the blob vertex are anomalous -- and
+    // asymmetric contamination pushes the margin distribution's left tail out.
+    // Measured at n100: true edges average skew +0.18, spurious -3.33.
+    // As a guard this is worth -0.62 err/rep; as a disjunctive ADDITION it is
+    // catastrophic (+7.5), which is the architecture rule again. 0 disables.
+    double skew_guard;
     // A side whose near set has only m = 2 taxa has exactly ONE near-side pair,
     // so its only variation is the anchor. The code emits ONE query per cycle
     // there (a 2-cycle would repeat the same 4-set), yet the availability

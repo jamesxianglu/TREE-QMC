@@ -96,6 +96,7 @@ Instance::Instance(int argc, char **argv) {
     branch_cut_anchor_rotate = false;    // one anchor pair per cycle, as before
     branch_cut_anchor_balanced = false;  // uniform-random rotation when rotating
     branch_cut_anchor_rotate_max = 0;    // rotate on every side
+    branch_cut_skew_guard = 0.0;         // no skew guard
     branch_cut_shared_coords = false;     // one sample per track, as before
     branch_cut_mode_spec = "";            // every track uses the cluster scan
     branch_cut_score_out = "";
@@ -512,6 +513,7 @@ long long Instance::solve() {
                 branch_cut.anchor_rotate = branch_cut_anchor_rotate;
                 branch_cut.anchor_balanced = branch_cut_anchor_balanced;
                 branch_cut.anchor_rotate_max = branch_cut_anchor_rotate_max;
+                branch_cut.skew_guard = branch_cut_skew_guard;
                 branch_cut.shared_coords = branch_cut_shared_coords;
                 branch_cut.score_out = branch_cut_score_out;
                 branch_cut.quad_out = branch_cut_quad_out;
@@ -1465,6 +1467,9 @@ int Instance::parse(int argc, char **argv) {
         else if (opt == "--branchcut-anchor-rotate") {
             branch_cut_anchor_rotate = true;
             branch_cut_anchor_spread = true;
+        }
+        else if (opt == "--branchcut-skew-guard") {
+            if (i < argc - 1) branch_cut_skew_guard = std::stod(argv[++ i]);
         }
         else if (opt == "--branchcut-anchor-rotate-max") {
             if (i < argc - 1) branch_cut_anchor_rotate_max = std::stoul(argv[++ i]);

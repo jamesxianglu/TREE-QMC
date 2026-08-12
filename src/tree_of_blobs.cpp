@@ -3742,14 +3742,16 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
         double mlc_d = 0.0, mlc_t = 0.0;
         const bool want_mlc = dumping || branch_cut.mlc_d != 0.0
                               || branch_cut.mlc_t != 0.0;
-        const bool want_disp = dumping || branch_cut.margin_q10 != 0.0
+        const bool want_disp = dumping || branch_cut.skew_guard != 0.0
+                               || branch_cut.margin_q10 != 0.0
                                || branch_cut.margin_sd != 0.0
                                || branch_cut.margin_min != 0.0 || want_mlc;
         // The dump wants the margin for every edge, including the ones the
         // cluster rule already rejected -- but only when the streams are fixed,
         // since under the shared stream an extra draw would shift every later
         // edge and the dump would no longer describe the run that produced it.
-        const bool force_res = dumping && branch_cut.fixed_streams;
+        const bool force_res = (dumping && branch_cut.fixed_streams)
+                               || branch_cut.skew_guard != 0.0;
         if ((!reject && (want_res || want_disp)) || force_res) {
             // `rng` is shared with the cluster sampling above, so this call must
             // stay in the same place and draw the same number of values as the
@@ -3843,6 +3845,19 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                     && mlc_d > (double) branch_cut.mlc_d) reject = true;
                 if (branch_cut.mlc_t != 0.0
                     && mlc_t > (double) branch_cut.mlc_t) reject = true;
+            }
+            // SKEW GUARD, applied last and only ever WITHDRAWING a rejection.
+            // Lem. branch-restriction makes a blob edge a mixture of anomalous
+            // and ordinary 4-sets, and asymmetric contamination pushes the
+            // margin distribution's LEFT tail out. A symmetric distribution is
+            // therefore evidence against a blob whatever fired, so the
+            // rejection is withdrawn. Conjunctive by construction: it can only
+            // reduce the rejection set, never grow it.
+            if (reject && branch_cut.skew_guard != 0.0
+                && disp[6] >= (double) branch_cut.margin_min_sets
+                && disp[6] >= 3.0
+                && disp[7] >= branch_cut.skew_guard) {
+                reject = false;
             }
         }
 
