@@ -3295,7 +3295,12 @@ SpeciesTree::SpeciesTree(std::vector<Tree *> &input, Dict *dict,
                     // Walecki's decomposition is exactly edge-disjoint, so it
                     // never needs the dedup -- and never loses a crossing to it.
                     const bool use_walecki = branch_cut.walecki && m >= 3;
-                    const bool rotate = branch_cut.anchor_rotate && t_A > 1;
+                    // Restrict rotation to the correlated regime: a side with
+                    // many anchor pairs is already decorrelated, and there a
+                    // fixed anchor CONCENTRATES the four-cycle signal instead.
+                    const bool rotate = branch_cut.anchor_rotate && t_A > 1
+                        && (branch_cut.anchor_rotate_max == 0
+                            || t_A <= (std::uint64_t) branch_cut.anchor_rotate_max);
                     std::unordered_set<std::uint64_t> seen;
                     const bool dedup = !use_walecki
                                        && (may_reuse || branch_cut.min_depth > 0)

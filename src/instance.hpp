@@ -66,6 +66,7 @@ class Instance {
         unsigned long int branch_cut_anchor_corroborate;
         bool branch_cut_m2_full, branch_cut_anchor_rotate, branch_cut_cycles_set;
         bool branch_cut_anchor_balanced;
+        unsigned long int branch_cut_anchor_rotate_max;
         std::string branch_cut_mode_spec, branch_cut_score_out, branch_cut_quad_out;
         unsigned long int rowsweep_anchors;
         weight_t oracle_cf_max, oracle_margin;

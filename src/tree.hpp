@@ -430,6 +430,15 @@ struct BranchCutParams {
     // rotation is meant to prevent. A systematic walk guarantees even coverage
     // and strictly lower variance at identical cost.
     bool anchor_balanced;
+    // Rotate ONLY on sides with t_A <= this. Measured at n150: rotation cuts
+    // false rejections where anchors are few (fn_test -0.06/rep at t_min 2-4,
+    // the regime Ass. blocked calls correlated) and costs blob detection where
+    // they are many (fp_blob +0.04/rep at t_min > 32, where a fixed anchor
+    // concentrates the four-cycle signal). Restricting it to the first regime
+    // keeps the benefit and drops the cost. 0 = no restriction; the principled
+    // value is ceil(1/tau), the anchor count below which Prop. count-floor is
+    // first order.
+    unsigned long int anchor_rotate_max;
     // A side whose near set has only m = 2 taxa has exactly ONE near-side pair,
     // so its only variation is the anchor. The code emits ONE query per cycle
     // there (a 2-cycle would repeat the same 4-set), yet the availability

@@ -29,7 +29,11 @@ Instance::Instance(int argc, char **argv) {
     rowsweep_seed = 20250729;
     // Defaults reproduce the original row sweep exactly. An empty tau spec
     // means "derive it from delta", as (1+delta)/4 always did.
-    oracle_spec = "t1";
+    // NO DEFAULT. `t1` silently requires R, and `sym` is a measured drop-in
+    // (same trees, 2-4x faster, no R). Which surrogate you use changes delta_0
+    // by two orders of magnitude on short branches, so it is a modelling
+    // choice, not a convenience default.
+    oracle_spec = "";
     rowsweep_tau_spec = "";
     rowsweep_tau2_spec = "";
     rowsweep_score_out = "";
@@ -72,7 +76,11 @@ Instance::Instance(int argc, char **argv) {
     branch_cut_mlc_d = 0.0;
     branch_cut_mlc_t = 0.0;
     branch_cut_mlc_min_group = 5;
-    branch_cut_fixed_streams = false;     // shared stream, as earlier runs used
+    // Default ON since 2026-08-11: a per-(edge, track, side) stream derived
+    // from the global seed makes a run independent of edge ordering. That is
+    // reproducibility, not accuracy. --branchcut-no-fixed-streams restores the
+    // single shared stream earlier runs used.
+    branch_cut_fixed_streams = true;
     // The three defaults below changed on 2026-08-11. Each was measured free
     // or better and the three together are the best configuration tested
     // (n150, 50 reps: err 11.92 -> 11.58*, fp_blob 1.82 -> 1.50*, J +0.018*).
@@ -87,6 +95,7 @@ Instance::Instance(int argc, char **argv) {
     branch_cut_m2_full = false;          // keep the conservative h <= t_A/2 at m=2
     branch_cut_anchor_rotate = false;    // one anchor pair per cycle, as before
     branch_cut_anchor_balanced = false;  // uniform-random rotation when rotating
+    branch_cut_anchor_rotate_max = 0;    // rotate on every side
     branch_cut_shared_coords = false;     // one sample per track, as before
     branch_cut_mode_spec = "";            // every track uses the cluster scan
     branch_cut_score_out = "";
@@ -502,6 +511,7 @@ long long Instance::solve() {
                 branch_cut.m2_full = branch_cut_m2_full;
                 branch_cut.anchor_rotate = branch_cut_anchor_rotate;
                 branch_cut.anchor_balanced = branch_cut_anchor_balanced;
+                branch_cut.anchor_rotate_max = branch_cut_anchor_rotate_max;
                 branch_cut.shared_coords = branch_cut_shared_coords;
                 branch_cut.score_out = branch_cut_score_out;
                 branch_cut.quad_out = branch_cut_quad_out;
@@ -1428,6 +1438,9 @@ int Instance::parse(int argc, char **argv) {
         else if (opt == "--branchcut-fixed-streams") {
             branch_cut_fixed_streams = true;
         }
+        else if (opt == "--branchcut-no-fixed-streams") {
+            branch_cut_fixed_streams = false;
+        }
         else if (opt == "--branchcut-cycle-reuse") {
             branch_cut_cycle_reuse = true;
         }
@@ -1452,6 +1465,9 @@ int Instance::parse(int argc, char **argv) {
         else if (opt == "--branchcut-anchor-rotate") {
             branch_cut_anchor_rotate = true;
             branch_cut_anchor_spread = true;
+        }
+        else if (opt == "--branchcut-anchor-rotate-max") {
+            if (i < argc - 1) branch_cut_anchor_rotate_max = std::stoul(argv[++ i]);
         }
         else if (opt == "--branchcut-anchor-balanced") {
             branch_cut_anchor_rotate = true;
@@ -1611,6 +1627,21 @@ int Instance::parse(int argc, char **argv) {
     if (corner_row_blob && row_sweep_blob) {
         std::cout << "\nERROR: --cornerrow-blob cannot be combined with "
                   << "--rowsweep-blob" << std::endl;
+        return 2;
+    }
+
+    if ((row_sweep_blob || corner_row_blob || branch_cut_blob)
+        && oracle_spec.empty()) {
+        std::cout << "\nERROR: --oracle is required and has no default.\n"
+                  << "  It selects the statistical surrogate for the delta-noisy "
+                  << "oracle, which is a\n"
+                  << "  modelling choice: delta_0 differs by two orders of "
+                  << "magnitude between terms on\n"
+                  << "  short branches (sym+cf 0.0007 flat; maj 0.109 at "
+                  << "t <= 0.01).\n"
+                  << "  Recommended: --oracle 'sym+cf|maj'  (no R needed).\n"
+                  << "  'sym' is a drop-in for 't1' -- same trees, 2-4x faster; "
+                  << "'t1' requires R." << std::endl;
         return 2;
     }
 
